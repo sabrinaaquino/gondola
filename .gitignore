@@ -1,0 +1,36 @@
+# Secrets and machine-specific configuration
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Private Gondola runtime data
+# This includes chats, full transcripts, sessions, memory, experience logs,
+# locally installed skills, MCP and channel settings, search indexes, schedules,
+# generated media, cached images, and workspace profiles.
+.gondola/
+# Legacy runtime path (pre-rename); kept ignored for older checkouts.
+.nova/
+
+# Personal memory exports kept beside the project
+MEMORIES.md
+
+# Local conversation exports
+*.conversation.jsonl
+*.transcript.jsonl
+
+# Logs and local debug traces (e.g. .cursor/debug-*.log)
+*.log
+
+# Operating system and editor state
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+.idea/
+
+# Build output and dependencies
+.next/
+node_modules/
+*.tsbuildinfo
