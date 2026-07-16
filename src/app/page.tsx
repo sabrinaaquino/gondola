@@ -3282,6 +3282,14 @@ function Workspace() {
           <div><strong>Gondola</strong></div>
           <button className="sidebar-collapse" onClick={toggleSidebar} aria-label="Hide sidebar" title="Hide sidebar"><PanelLeftIcon size={16} /></button>
         </div>
+        <button
+          className="sidebar-new-chat"
+          onClick={() => void startNewConversation()}
+          aria-label="Start a new chat"
+          title="Start a new chat"
+        >
+          <PlusIcon size={15} /><span>New chat</span>
+        </button>
         <nav className="topbar-actions" aria-label="Workspace navigation">
           <div className="sidebar-section sidebar-search-section">
             <ConversationSearch
