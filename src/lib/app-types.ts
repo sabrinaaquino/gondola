@@ -135,6 +135,8 @@ export interface MediaArtifact {
   resolution?: string;
   soundtrack?: "none" | "natural" | "music";
   audioDirection?: string;
+  taskId?: string;
+  assetId?: string;
 }
 
 export interface CatalogModel {
