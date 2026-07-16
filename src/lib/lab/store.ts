@@ -224,6 +224,18 @@ export async function saveProposal(proposal: ImprovementProposal): Promise<Impro
   });
 }
 
+/** Remove a proposal record. Returns true if one was removed. Immutable traces,
+ * config versions, and evaluations are left intact for audit. */
+export async function deleteProposal(proposalId: string): Promise<boolean> {
+  return serial(async () => {
+    const store = await readJson<{ proposals: ImprovementProposal[] }>(proposalsFile(), { proposals: [] });
+    const remaining = store.proposals.filter((proposal) => proposal.proposalId !== proposalId);
+    if (remaining.length === store.proposals.length) return false;
+    await atomicWrite(proposalsFile(), { proposals: remaining });
+    return true;
+  });
+}
+
 // ── Evaluations ────────────────────────────────────────────────────────────────
 
 export async function saveEvaluation(evaluation: EvaluationRecord): Promise<EvaluationRecord> {

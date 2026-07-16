@@ -1,6 +1,7 @@
 import os from "node:os";
 import {
   createChallenger,
+  deleteProposal as deleteProposalRecord,
   getChampion,
   getConfigState,
   getEvaluation,
@@ -229,6 +230,12 @@ export async function rejectProposal(proposalId: string): Promise<ImprovementPro
   const proposal = await getProposal(proposalId);
   if (!proposal) throw new Error("Proposal not found.");
   return saveProposal({ ...proposal, status: "rejected" });
+}
+
+/** Delete a proposal record entirely (declutter). Leaves traces, config versions,
+ * and evaluations intact for audit. */
+export async function deleteProposal(proposalId: string): Promise<boolean> {
+  return deleteProposalRecord(proposalId);
 }
 
 /** Roll back to the previous champion in one operation. */
