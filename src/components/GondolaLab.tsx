@@ -6,6 +6,7 @@ import type {
   EvaluationRecord,
   ImprovementProposal,
   PromotionRecord,
+  WorkflowPolicy,
 } from "@/lib/lab/types";
 
 interface TraceSummary {
@@ -45,46 +46,77 @@ interface GondolaLabProps {
   agentId?: string;
 }
 
+type Tab = "overview" | "experiments" | "runs" | "setup" | "abilities";
+
 const CSS = `
 .gl-scrim { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: rgba(4,5,9,.62); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); animation: gl-fade .16s ease; }
 @keyframes gl-fade { from { opacity: 0; } to { opacity: 1; } }
-.gl-panel { display: flex; flex-direction: column; width: 100%; max-width: 1200px; height: min(90vh, 880px); border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(160deg, rgba(20,22,28,.98), rgba(8,9,13,.99)); box-shadow: var(--shadow), 0 40px 100px -34px rgba(0,0,0,.85); overflow: hidden; }
-.gl-head { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px 16px; border-bottom: 1px solid var(--line); }
+.gl-panel { display: flex; flex-direction: column; width: 100%; max-width: 1180px; height: min(90vh, 880px); border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(160deg, rgba(20,22,28,.98), rgba(8,9,13,.99)); box-shadow: var(--shadow), 0 40px 100px -34px rgba(0,0,0,.85); overflow: hidden; }
+.gl-head { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px 14px; }
 .gl-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .gl-kicker { color: var(--mint); font-size: 8px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
 .gl-head h2 { margin: 0; color: var(--ink); font-size: 17px; font-weight: 640; letter-spacing: -.02em; }
-.gl-head p { margin: 0; color: var(--faint); font-size: 11.5px; }
+.gl-head p { margin: 0; color: var(--faint); font-size: 11.5px; max-width: 62ch; line-height: 1.5; }
 .gl-close { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: transparent; cursor: pointer; }
 .gl-close:hover { color: var(--ink); border-color: var(--line-bright); background: rgba(255,255,255,.05); }
-.gl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
-.gl-btn { height: 32px; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: rgba(255,255,255,.03); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .14s, background .14s; }
-.gl-btn:hover:not(:disabled) { border-color: var(--line-bright); background: rgba(255,255,255,.06); }
-.gl-btn:disabled { opacity: .4; cursor: default; }
-.gl-btn.primary { color: #11151b; background: linear-gradient(145deg, #f7f6f2, #b7c9dd); border: 0; }
-.gl-btn.danger { color: var(--coral); border-color: rgba(255,142,122,.3); }
-.gl-champ { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 11px; }
-.gl-champ b { color: var(--mint); font-variant-numeric: tabular-nums; }
-.gl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0,1fr); }
-.gl-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
-.gl-rail h3 { margin: 4px 6px; color: var(--faint); font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.gl-prop { text-align: left; border: 1px solid var(--line); border-radius: 11px; background: transparent; color: var(--ink); padding: 9px 11px; cursor: pointer; transition: border-color .14s, background .14s; }
-.gl-prop:hover { border-color: var(--line-bright); }
-.gl-prop.is-active { border-color: rgba(184,207,232,.42); background: rgba(184,207,232,.06); }
-.gl-prop small { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gl-prop-row { display: flex; align-items: center; gap: 8px; }
-.gl-prop-select { all: unset; flex: 1; min-width: 0; cursor: pointer; }
-.gl-prop-delete { flex: 0 0 auto; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; color: var(--faint); background: transparent; cursor: pointer; opacity: .45; transition: color .14s, background .14s, opacity .14s; }
-.gl-prop:hover .gl-prop-delete { opacity: .7; }
-.gl-prop-delete:hover:not(:disabled) { color: var(--coral); background: rgba(255,142,122,.12); opacity: 1; }
-.gl-prop-delete:disabled { opacity: .2; cursor: default; }
-.gl-status { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.gl-nav { display: flex; align-items: center; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.gl-tab { position: relative; height: 38px; padding: 0 12px; border: 0; background: transparent; color: var(--faint); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; transition: color .14s; }
+.gl-tab:hover { color: var(--muted); }
+.gl-tab.is-active { color: var(--ink); border-bottom-color: var(--mint); }
+.gl-badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 999px; background: rgba(159,183,210,.16); color: var(--aqua); font-size: 9px; font-weight: 800; vertical-align: middle; }
+.gl-content { flex: 1; min-height: 0; overflow-y: auto; }
+.gl-split { display: grid; grid-template-columns: 300px minmax(0,1fr); height: 100%; }
+.gl-list { border-right: 1px solid var(--line); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.gl-list h3 { margin: 8px 6px 2px; color: var(--faint); font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.gl-detail { overflow-y: auto; padding: 18px 22px; color: #ccd2da; font-size: 13px; }
+.gl-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gl-detail-head h3 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 640; letter-spacing: -.01em; }
+.gl-detail h4 { margin: 18px 0 7px; color: var(--ink); font-size: 12px; font-weight: 660; letter-spacing: .01em; }
+.gl-detail p { margin: 0 0 6px; line-height: 1.6; }
+.gl-detail .muted { color: var(--faint); font-size: 12px; }
+.gl-row { text-align: left; border: 1px solid var(--line); border-radius: 11px; background: transparent; color: var(--ink); padding: 9px 11px; cursor: pointer; transition: border-color .14s, background .14s; display: flex; align-items: center; gap: 8px; }
+.gl-row:hover { border-color: var(--line-bright); background: rgba(255,255,255,.02); }
+.gl-row.is-active { border-color: rgba(184,207,232,.42); background: rgba(184,207,232,.06); }
+.gl-row-main { all: unset; flex: 1; min-width: 0; cursor: pointer; display: block; }
+.gl-row-title { display: block; color: var(--ink); font-size: 12px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-row small { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-icon-btn { flex: 0 0 auto; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; color: var(--faint); background: transparent; cursor: pointer; opacity: .45; transition: color .14s, background .14s, opacity .14s; }
+.gl-row:hover .gl-icon-btn { opacity: .7; }
+.gl-icon-btn:hover:not(:disabled) { color: var(--coral); background: rgba(255,142,122,.12); opacity: 1; }
+.gl-icon-btn:disabled { opacity: .2; cursor: default; }
+.gl-status { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .gl-status.ready_for_review, .gl-status.promoted { color: #8bbf9d; background: rgba(139,191,157,.12); }
 .gl-status.failed, .gl-status.rejected, .gl-status.rolled_back { color: var(--coral); background: rgba(255,142,122,.12); }
 .gl-status.draft, .gl-status.evaluating { color: var(--aqua); background: rgba(159,183,210,.12); }
-.gl-detail { overflow-y: auto; padding: 16px 20px; color: #ccd2da; font-size: 13px; }
-.gl-detail h4 { margin: 16px 0 7px; color: var(--ink); font-size: 12px; font-weight: 660; letter-spacing: .01em; }
-.gl-detail p { margin: 0 0 6px; line-height: 1.6; }
-.gl-detail .muted { color: var(--faint); font-size: 12px; }
+.gl-page { padding: 18px 22px; display: flex; flex-direction: column; gap: 18px; }
+.gl-tiles { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+.gl-tile { text-align: left; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.02); padding: 13px 14px; cursor: pointer; transition: border-color .14s, background .14s; }
+.gl-tile:hover { border-color: var(--line-bright); background: rgba(255,255,255,.04); }
+.gl-tile b { display: block; color: var(--ink); font-size: 22px; font-weight: 660; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.gl-tile b.good { color: #8bbf9d; }
+.gl-tile span { display: block; color: var(--faint); font-size: 11px; margin-top: 2px; }
+.gl-card { border: 1px solid var(--line); border-radius: 16px; background: rgba(255,255,255,.02); padding: 16px 18px; }
+.gl-card h3 { margin: 0 0 4px; color: var(--ink); font-size: 13px; font-weight: 640; }
+.gl-card p.sub { margin: 0 0 10px; color: var(--faint); font-size: 11.5px; }
+.gl-facts { display: flex; flex-direction: column; gap: 5px; }
+.gl-fact { display: flex; align-items: baseline; gap: 8px; color: #c4cbd4; font-size: 12.5px; }
+.gl-fact i { width: 5px; height: 5px; border-radius: 50%; background: var(--mint); flex: 0 0 auto; transform: translateY(-2px); }
+.gl-cta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gl-cta .hint { color: var(--faint); font-size: 11.5px; }
+.gl-timeline { display: flex; flex-direction: column; gap: 0; }
+.gl-event { display: flex; gap: 11px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.gl-event:last-child { border-bottom: 0; }
+.gl-event i { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex: 0 0 auto; }
+.gl-event.promote i { background: #8bbf9d; } .gl-event.rollback i { background: var(--coral); }
+.gl-event b { color: var(--ink); font-size: 12.5px; font-weight: 560; }
+.gl-event span { color: var(--faint); font-size: 11px; }
+.gl-btn { height: 32px; padding: 0 14px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: rgba(255,255,255,.03); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .14s, background .14s; }
+.gl-btn:hover:not(:disabled) { border-color: var(--line-bright); background: rgba(255,255,255,.06); }
+.gl-btn:disabled { opacity: .4; cursor: default; }
+.gl-btn.primary { color: #11151b; background: linear-gradient(145deg, #f7f6f2, #b7c9dd); border: 0; }
+.gl-btn.small { height: 27px; padding: 0 10px; font-size: 11px; }
+.gl-btn.danger { color: var(--coral); border-color: rgba(255,142,122,.3); }
+.gl-btn.ghost { background: transparent; color: var(--faint); }
 .gl-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
 .gl-table th, .gl-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 .gl-table th { color: var(--faint); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
@@ -96,21 +128,69 @@ const CSS = `
 .gl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .gl-approver { height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.03); color: var(--ink); font: inherit; font-size: 12px; outline: none; }
 .gl-approver:focus { border-color: rgba(184,207,232,.45); }
-.gl-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
-.gl-err { color: var(--coral); font-size: 12px; margin: 8px 20px; }
+.gl-empty { display: grid; place-items: center; height: 100%; min-height: 220px; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
+.gl-empty .gl-empty-inner { max-width: 42ch; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.gl-err { color: var(--coral); font-size: 12px; margin: 8px 20px 0; }
+.gl-notice { margin: 8px 20px 0; padding: 9px 12px; border: 1px solid rgba(159,183,210,.24); border-radius: 10px; color: #c4cbd4; font-size: 12px; background: rgba(159,183,210,.06); }
 .gl-live-toggle { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; cursor: pointer; }
 .gl-live-toggle input { accent-color: var(--mint); }
-.gl-mini { display: flex; gap: 6px; margin-top: 7px; }
-.gl-mini .gl-btn { height: 26px; padding: 0 10px; font-size: 11px; }
 `;
+
+const STATUS_LABEL: Record<string, string> = {
+  draft: "Not tested yet",
+  evaluating: "Testing",
+  ready_for_review: "Ready to review",
+  promoted: "Adopted",
+  rejected: "Rejected",
+  failed: "Didn't pass",
+  rolled_back: "Reverted",
+};
+
+const GATE_LABEL: Record<string, string> = {
+  no_critical_regression: "No critical regressions",
+  no_replay_regression: "No regressions on known-good tasks",
+  target_metric_improved: "The target actually improved",
+  cost_within_tolerance: "Cost stayed within tolerance",
+  no_contamination: "Test tasks were kept unseen",
+  heldout_deterministic_non_regression: "Held up on unseen tasks (automatic checks)",
+  no_quality_regression: "Quality didn't drop",
+};
 
 function pct(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
+function statusLabel(status: string): string {
+  return STATUS_LABEL[status] ?? status.replace(/_/g, " ");
+}
+
+function gateLabel(name: string): string {
+  return GATE_LABEL[name] ?? name.replace(/_/g, " ");
+}
+
+function prettyField(field: string): string {
+  const bare = field.replace("workflowPolicy.", "").replace(/([A-Z])/g, " $1").toLowerCase().trim();
+  return bare.charAt(0).toUpperCase() + bare.slice(1);
+}
+
+function describeSetup(policy?: WorkflowPolicy): string[] {
+  if (!policy) return [];
+  return [
+    `Explores ${policy.conceptCount} idea${policy.conceptCount === 1 ? "" : "s"} before choosing`,
+    policy.useSeparateCritic ? "Reviews its work with a separate critic" : "No separate critic",
+    policy.requireAnalyzeBeforeAnimate ? "Inspects an image before animating it" : "May animate without inspecting first",
+    policy.reviseBelowQuality !== null ? `Revises up to ${policy.maxRevisions}x when quality is below ${policy.reviseBelowQuality}` : "No automatic revision",
+    `Spends at most $${policy.budgetUsd.toFixed(2)} per task`,
+    policy.latencyMode === "fast" ? "Speed mode: terser, less deliberation" : "Balanced speed",
+  ];
+}
+
 export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaLabProps) {
   const [snapshot, setSnapshot] = useState<LabSnapshot | null>(null);
+  const [tab, setTab] = useState<Tab>("overview");
   const [selected, setSelected] = useState<string>("");
+  const [selectedTrace, setSelectedTrace] = useState<string>("");
+  const [selectedAbility, setSelectedAbility] = useState<string>("");
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -153,13 +233,14 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
       });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? `Request failed (${response.status}).`);
+      if (action === "delete_ability" && selectedAbility === id) setSelectedAbility("");
       await loadAbilities();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Request failed.");
     } finally {
       setBusy("");
     }
-  }, [agentId, approver, loadAbilities]);
+  }, [agentId, approver, loadAbilities, selectedAbility]);
 
   useEffect(() => {
     if (open) { void loadSnapshot(); void loadAbilities(); }
@@ -181,10 +262,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
       });
       const payload = await response.json().catch(() => ({})) as { error?: string; proposal?: ImprovementProposal | null };
       if (!response.ok) throw new Error(payload.error ?? `Request failed (${response.status}).`);
-      if (action === "generate_proposal") {
-        if (payload.proposal) setSelected(payload.proposal.proposalId);
-        else setNotice("No new suggestions right now.");
-      }
       await loadSnapshot();
       if (selected) await loadDetail(selected);
       return payload;
@@ -195,6 +272,17 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
       setBusy("");
     }
   }, [loadSnapshot, loadDetail, selected]);
+
+  const lookForImprovements = useCallback(async () => {
+    const payload = await act("generate_proposal");
+    if (!payload) return;
+    if (payload.proposal) {
+      setTab("experiments");
+      setSelected(payload.proposal.proposalId);
+    } else {
+      setNotice("Nothing new to test right now. Every pattern the Lab has seen is already being tested or doesn't have enough evidence yet — let Entity run more tasks and check back.");
+    }
+  }, [act]);
 
   useEffect(() => {
     if (!open) return;
@@ -207,8 +295,34 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
 
   const champion = snapshot?.champion;
   const policy = champion?.config.workflowPolicy;
+  const proposals = snapshot?.proposals ?? [];
+  const traces = snapshot?.traces ?? [];
+  const history = snapshot?.history ?? [];
+  const pendingAbilities = abilities.filter((ability) => ability.status === "pending");
+  const approvedAbilities = abilities.filter((ability) => ability.status === "approved");
   const proposal = detail?.proposal;
   const report = detail?.evaluation?.report;
+
+  const readyCount = proposals.filter((item) => item.status === "ready_for_review").length;
+  const adoptedCount = proposals.filter((item) => item.status === "promoted").length;
+  const progressCount = proposals.filter((item) => item.status === "draft" || item.status === "evaluating").length;
+  const rejectedCount = proposals.filter((item) => item.status === "rejected" || item.status === "failed" || item.status === "rolled_back").length;
+  const nothingYet = proposals.length === 0 && traces.length === 0;
+  const canRevert = history.some((record) => record.action === "promote");
+  const canUndoRevert = history[history.length - 1]?.action === "rollback";
+
+  const versionName = (id: string | null | undefined) => (id ? id.slice(0, 8) : "none");
+
+  const tabs: { id: Tab; label: string; badge?: number }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "experiments", label: "Experiments", badge: readyCount || undefined },
+    { id: "runs", label: "Runs" },
+    { id: "setup", label: "Setup & history" },
+    { id: "abilities", label: "Abilities", badge: pendingAbilities.length || undefined },
+  ];
+
+  const selectedAbilityData = abilities.find((ability) => ability.id === selectedAbility);
+  const selectedTraceData = traces.find((trace) => trace.runId === selectedTrace);
 
   return (
     <div className="gl-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -217,170 +331,300 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         <header className="gl-head">
           <div className="gl-titles">
             <span className="gl-kicker">Gondola Lab</span>
-            <h2>Champion vs challenger</h2>
-            <p>An external control plane proposes and validates config changes. Nothing promotes without your approval.</p>
+            <h2>Research on Entity</h2>
+            <p>A research lab with one subject. It watches Entity work, forms ideas from what recurs, tests them against the current setup, and adopts only what proves out — with your approval.</p>
           </div>
           <button className="gl-close" onClick={onClose} aria-label="Close Gondola Lab"><CloseIcon size={16} /></button>
         </header>
 
-        <div className="gl-toolbar">
-          <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void act("seed_demo")}>Seed demo run</button>
-          <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("generate_proposal")}>Generate proposal</button>
-          <button className="gl-btn" disabled={Boolean(busy) || !snapshot?.history.some((record) => record.action === "promote")} onClick={() => void act("rollback", { approvedBy: approver || "user" })}>Rollback champion</button>
-          <button className="gl-btn" disabled={Boolean(busy) || !snapshot || snapshot.history[snapshot.history.length - 1]?.action !== "rollback"} onClick={() => void act("undo_rollback", { approvedBy: approver || "user" })}>Undo rollback</button>
-          <span className="gl-champ">
-            Champion <b>{champion ? champion.versionId.slice(0, 8) : "none"}</b>
-            {policy ? ` · ${policy.conceptCount} concept(s), critic ${policy.useSeparateCritic ? "on" : "off"}, gate ${policy.requireAnalyzeBeforeAnimate ? "on" : "off"}` : ""}
-          </span>
-        </div>
+        <nav className="gl-nav">
+          {tabs.map((entry) => (
+            <button key={entry.id} className={`gl-tab${tab === entry.id ? " is-active" : ""}`} onClick={() => setTab(entry.id)}>
+              {entry.label}{entry.badge ? <span className="gl-badge">{entry.badge}</span> : null}
+            </button>
+          ))}
+        </nav>
 
         {error ? <div className="gl-err">{error}</div> : null}
-        {notice ? <div style={{ padding: "4px 14px 8px", fontSize: "12px", opacity: 0.7 }}>{notice}</div> : null}
+        {notice ? <div className="gl-notice">{notice}</div> : null}
 
-        <div className="gl-body">
-          <div className="gl-rail">
-            <h3>Proposals</h3>
-            {snapshot?.proposals.length
-              ? snapshot.proposals.map((item) => (
-                <div key={item.proposalId} className={`gl-prop gl-prop-row${selected === item.proposalId ? " is-active" : ""}`}>
-                  <button type="button" className="gl-prop-select" onClick={() => setSelected(item.proposalId)}>
-                    <span className={`gl-status ${item.status}`}>{item.status.replace(/_/g, " ")}</span>
-                    <small>{item.observedProblem}</small>
-                  </button>
-                  <button type="button" className="gl-prop-delete" title="Delete proposal" aria-label="Delete proposal" disabled={Boolean(busy)} onClick={() => {
-                    const id = item.proposalId;
-                    void act("delete_proposal", { proposalId: id }).then(() => {
-                      if (selected === id) { setSelected(""); setDetail(null); }
-                    });
-                  }}>
-                    <TrashIcon size={14} />
-                  </button>
+        <div className="gl-content">
+          {/* ── Overview ─────────────────────────────────────────── */}
+          {tab === "overview" && (
+            nothingYet ? (
+              <div className="gl-empty">
+                <div className="gl-empty-inner">
+                  <p>The Lab hasn&apos;t watched Entity work yet, so there&apos;s nothing to study.</p>
+                  <p className="muted">Let Entity run some tasks, or load a few sample runs to explore how the Lab works.</p>
+                  <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => { void act("seed_demo").then(() => setNotice("Loaded sample runs. Try \u201cLook for improvements\u201d to see the Lab propose a test.")); }}>Load sample data</button>
                 </div>
-              ))
-              : <p className="muted" style={{ margin: "6px" }}>No proposals yet. Seed a run, then generate one.</p>}
-            <h3>Pending abilities</h3>
-            {abilities.filter((ability) => ability.status === "pending").length
-              ? abilities.filter((ability) => ability.status === "pending").map((ability) => (
-                <div key={ability.id} className="gl-prop" style={{ cursor: "default" }}>
-                  <small style={{ marginTop: 0, color: "var(--ink)" }}>{ability.name}</small>
-                  <small>{ability.description}</small>
-                  <div className="gl-mini">
-                    <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", ability.id)}>Approve</button>
-                    <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>Reject</button>
-                  </div>
-                </div>
-              ))
-              : <p className="muted" style={{ margin: "6px" }}>No abilities awaiting approval.</p>}
-
-            <h3>Approved abilities</h3>
-            {abilities.filter((ability) => ability.status === "approved").length
-              ? abilities.filter((ability) => ability.status === "approved").map((ability) => (
-                <div key={ability.id} className="gl-prop gl-prop-row" style={{ cursor: "default" }}>
-                  <div className="gl-prop-select" style={{ cursor: "default" }}>
-                    <small style={{ marginTop: 0, color: "var(--ink)" }}>{ability.name}</small>
-                    <small>{ability.description}</small>
-                  </div>
-                  <button type="button" className="gl-prop-delete" title="Remove ability" aria-label="Remove ability" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>
-                    <TrashIcon size={14} />
-                  </button>
-                </div>
-              ))
-              : <p className="muted" style={{ margin: "6px" }}>No approved abilities yet.</p>}
-
-            <h3>Recent traces</h3>
-            {snapshot?.traces.slice(0, 6).map((trace) => (
-              <div key={trace.runId} className="gl-prop" style={{ cursor: "default" }}>
-                <small style={{ marginTop: 0 }}>{trace.goal.slice(0, 60)}</small>
-                <small>q {trace.quality.toFixed(1)} · ${trace.costUsd.toFixed(2)} · {trace.humanInterventions} interventions · {trace.deterministicPassed ? "checks pass" : "checks fail"}</small>
               </div>
-            ))}
-          </div>
-
-          <div className="gl-detail">
-            {!proposal ? (
-              <div className="gl-empty">Select a proposal to see its evidence, configuration diff, and champion vs challenger evaluation.</div>
             ) : (
-              <>
-                <h4>Observed problem</h4>
-                <p>{proposal.observedProblem}</p>
-                <h4>Hypothesis</h4>
-                <p className="muted">{proposal.hypothesis}</p>
-                <p className="muted">Evidence: {proposal.traceEvidence.length} trace(s) · target {proposal.targetMetric} · risk {proposal.riskLevel}</p>
-                {proposal.proposerFeedback ? <p className="muted">Proposer context: {proposal.proposerFeedback}</p> : null}
+              <div className="gl-page">
+                <div className="gl-tiles">
+                  <button className="gl-tile" onClick={() => setTab("experiments")}><b className={readyCount ? "good" : ""}>{readyCount}</b><span>Ready to review</span></button>
+                  <button className="gl-tile" onClick={() => setTab("experiments")}><b>{progressCount}</b><span>In progress</span></button>
+                  <button className="gl-tile" onClick={() => setTab("experiments")}><b>{adoptedCount}</b><span>Adopted changes</span></button>
+                  <button className="gl-tile" onClick={() => setTab("experiments")}><b>{rejectedCount}</b><span>Ruled out</span></button>
+                  <button className="gl-tile" onClick={() => setTab("runs")}><b>{traces.length}</b><span>Runs recorded</span></button>
+                  <button className="gl-tile" onClick={() => setTab("abilities")}><b className={pendingAbilities.length ? "good" : ""}>{pendingAbilities.length}</b><span>Abilities awaiting you</span></button>
+                </div>
 
-                <h4>Configuration diff</h4>
-                {detail?.diff.length ? (
-                  <table className="gl-table">
-                    <thead><tr><th>Field</th><th>Champion</th><th>Challenger</th></tr></thead>
-                    <tbody>
-                      {detail.diff.map((change) => (
-                        <tr key={change.field}><td>{change.field}</td><td>{String(change.from)}</td><td>{String(change.to)}</td></tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : <p className="muted">No field changes.</p>}
+                <div className="gl-card">
+                  <h3>Look for improvements</h3>
+                  <p className="sub">The Lab scans recent runs for recurring problems and, if it finds one worth testing, sets up an experiment against the current setup.</p>
+                  <div className="gl-cta">
+                    <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void lookForImprovements()}>Look for improvements</button>
+                    <span className="hint">Nothing is ever adopted without your approval.</span>
+                  </div>
+                </div>
 
-                {proposal.status === "draft" && (
+                <div className="gl-card">
+                  <h3>Current setup</h3>
+                  <p className="sub">What Entity uses right now · version {versionName(champion?.versionId)}</p>
+                  <div className="gl-facts">
+                    {describeSetup(policy).map((fact) => (
+                      <div key={fact} className="gl-fact"><i />{fact}</div>
+                    ))}
+                  </div>
+                  <div className="gl-cta" style={{ marginTop: 12 }}>
+                    <button className="gl-btn small ghost" onClick={() => setTab("setup")}>View setup &amp; history</button>
+                  </div>
+                </div>
+              </div>
+            )
+          )}
+
+          {/* ── Experiments ──────────────────────────────────────── */}
+          {tab === "experiments" && (
+            <div className="gl-split">
+              <div className="gl-list">
+                <div className="gl-cta" style={{ marginBottom: 4 }}>
+                  <button className="gl-btn primary small" disabled={Boolean(busy)} onClick={() => void lookForImprovements()}>Look for improvements</button>
+                </div>
+                {proposals.length ? proposals.map((item) => (
+                  <div key={item.proposalId} className={`gl-row${selected === item.proposalId ? " is-active" : ""}`}>
+                    <button type="button" className="gl-row-main" onClick={() => setSelected(item.proposalId)}>
+                      <span className={`gl-status ${item.status}`}>{statusLabel(item.status)}</span>
+                      <small style={{ marginTop: 5 }}>{item.observedProblem}</small>
+                    </button>
+                    <button type="button" className="gl-icon-btn" title="Delete experiment" aria-label="Delete experiment" disabled={Boolean(busy)} onClick={() => {
+                      const id = item.proposalId;
+                      void act("delete_proposal", { proposalId: id }).then(() => { if (selected === id) { setSelected(""); setDetail(null); } });
+                    }}>
+                      <TrashIcon size={14} />
+                    </button>
+                  </div>
+                )) : <p className="muted" style={{ margin: "6px" }}>No experiments yet. Use &ldquo;Look for improvements&rdquo; to create one.</p>}
+              </div>
+
+              <div className="gl-detail">
+                {!proposal ? (
+                  <div className="gl-empty">Pick an experiment to see the idea, the test, and the result.</div>
+                ) : (
+                  <>
+                    <div className="gl-detail-head">
+                      <span className={`gl-status ${proposal.status}`}>{statusLabel(proposal.status)}</span>
+                      <h3>{proposal.observedProblem}</h3>
+                    </div>
+
+                    <h4>The idea</h4>
+                    <p className="muted">{proposal.hypothesis}</p>
+                    <p className="muted">Based on {proposal.traceEvidence.length} run(s) · aims to improve {proposal.targetMetric.replace(/_/g, " ")} · {proposal.riskLevel} risk</p>
+                    {proposal.proposerFeedback ? <p className="muted">Prior context: {proposal.proposerFeedback}</p> : null}
+
+                    <h4>What would change</h4>
+                    {detail?.diff.length ? (
+                      <table className="gl-table">
+                        <thead><tr><th>Setting</th><th>Now</th><th>Variation</th></tr></thead>
+                        <tbody>
+                          {detail.diff.map((change) => (
+                            <tr key={change.field}><td>{prettyField(change.field)}</td><td>{String(change.from)}</td><td>{String(change.to)}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : <p className="muted">No settings change.</p>}
+
+                    {proposal.status === "draft" && (
+                      <div className="gl-actions">
+                        <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>{live ? "Run real test" : "Run test"}</button>
+                        <label className="gl-live-toggle"><input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Real inference (spends budget)</label>
+                      </div>
+                    )}
+
+                    {report ? (
+                      <>
+                        <h4>Result</h4>
+                        <p className="muted">Judged on <strong>{report.targetMetric.replace(/_/g, " ")}</strong>: {pct(report.targetImprovementPct)} {report.targetImprovementPct >= 0 ? "better" : "worse"}.</p>
+                        <table className="gl-table">
+                          <thead><tr><th>Measure</th><th>Now</th><th>Variation</th><th>Δ</th></tr></thead>
+                          <tbody>
+                            <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td>{report.challengerQuality.toFixed(1)}</td><td className={report.qualityDeltaPct >= 0 ? "gl-up" : "gl-down"}>{pct(report.qualityDeltaPct)}</td></tr>
+                            <tr><td>Completion</td><td>{report.championCompletionPct.toFixed(0)}%</td><td>{report.challengerCompletionPct.toFixed(0)}%</td><td className={report.challengerCompletionPct >= report.championCompletionPct ? "gl-up" : "gl-down"}>{(report.challengerCompletionPct - report.championCompletionPct).toFixed(0)} pts</td></tr>
+                            <tr><td>Held-out (auto checks)</td><td>{report.championHeldOutPassRate.toFixed(0)}%</td><td>{report.challengerHeldOutPassRate.toFixed(0)}%</td><td className={report.challengerHeldOutPassRate >= report.championHeldOutPassRate ? "gl-up" : "gl-down"}>{(report.challengerHeldOutPassRate - report.championHeldOutPassRate).toFixed(0)} pts</td></tr>
+                            <tr><td>Cost (total)</td><td>${report.championCost.toFixed(2)}</td><td>${report.challengerCost.toFixed(2)}</td><td className={report.costDeltaPct <= 0 ? "gl-up" : "gl-down"}>{pct(report.costDeltaPct)}</td></tr>
+                            <tr><td>Human interventions</td><td>{report.championInterventions}</td><td>{report.challengerInterventions}</td><td /></tr>
+                          </tbody>
+                        </table>
+
+                        <h4>Checks</h4>
+                        {report.gates.map((gate) => (
+                          <div key={gate.name} className={`gl-gate ${gate.passed ? "pass" : "fail"}`}><i />{gateLabel(gate.name)} <small>{gate.detail}</small></div>
+                        ))}
+                        {report.replayRegressions.length ? <p className="gl-down" style={{ marginTop: 8 }}>Regressed on known-good tasks: {report.replayRegressions.join(", ")}</p> : null}
+
+                        <div className="gl-actions">
+                          <input className="gl-approver" placeholder="Your name (to approve)" value={approver} onChange={(event) => setApprover(event.target.value)} />
+                          <button className="gl-btn primary" disabled={Boolean(busy) || proposal.status !== "ready_for_review" || !approver.trim()} onClick={() => void act("promote", { proposalId: proposal.proposalId, approvedBy: approver })}>
+                            {proposal.status === "promoted" ? "Adopted" : "Adopt this change"}
+                          </button>
+                          <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
+                          {proposal.status === "ready_for_review" && proposal.autonomyTier === "auto" ? <span className="muted">Safe enough to adopt on its own when autopilot is on (deterministic, held-out, low-risk).</span> : null}
+                          {proposal.autonomyTier === "protected" ? <span className="muted">This kind of change always needs you.</span> : null}
+                          {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only an experiment that passes every check can be adopted.</span> : null}
+                        </div>
+                      </>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Runs ─────────────────────────────────────────────── */}
+          {tab === "runs" && (
+            <div className="gl-split">
+              <div className="gl-list">
+                {traces.length ? traces.map((trace) => (
+                  <div key={trace.runId} className={`gl-row${selectedTrace === trace.runId ? " is-active" : ""}`}>
+                    <button type="button" className="gl-row-main" onClick={() => setSelectedTrace(trace.runId)}>
+                      <span className="gl-row-title">{trace.goal.slice(0, 52) || "Untitled run"}</span>
+                      <small>{trace.completed ? "completed" : "did not finish"} · ${trace.costUsd.toFixed(2)} · {trace.deterministicPassed ? "checks pass" : "checks fail"}</small>
+                    </button>
+                  </div>
+                )) : <p className="muted" style={{ margin: "6px" }}>No runs recorded yet.</p>}
+              </div>
+              <div className="gl-detail">
+                {!selectedTraceData ? (
+                  <div className="gl-empty">Pick a run to inspect what happened.</div>
+                ) : (
+                  <>
+                    <div className="gl-detail-head">
+                      <span className={`gl-status ${selectedTraceData.completed ? "promoted" : "failed"}`}>{selectedTraceData.completed ? "Completed" : "Did not finish"}</span>
+                      <h3>{selectedTraceData.goal || "Untitled run"}</h3>
+                    </div>
+                    <table className="gl-table">
+                      <tbody>
+                        <tr><td>Automatic checks</td><td className={selectedTraceData.deterministicPassed ? "gl-up" : "gl-down"}>{selectedTraceData.deterministicPassed ? "passed" : "failed"}</td></tr>
+                        <tr><td>Quality (judge)</td><td>{selectedTraceData.quality.toFixed(1)} / 10</td></tr>
+                        <tr><td>Cost</td><td>${selectedTraceData.costUsd.toFixed(2)}</td></tr>
+                        <tr><td>Human interventions</td><td>{selectedTraceData.humanInterventions}</td></tr>
+                        <tr><td>Run id</td><td>{selectedTraceData.runId.slice(0, 12)}</td></tr>
+                      </tbody>
+                    </table>
+                    <p className="muted" style={{ marginTop: 12 }}>These runs are the raw evidence the Lab studies. Recurring problems across runs become experiments.</p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Setup & history ──────────────────────────────────── */}
+          {tab === "setup" && (
+            <div className="gl-page">
+              <div className="gl-card">
+                <h3>Current setup</h3>
+                <p className="sub">What Entity uses right now · version {versionName(champion?.versionId)}{champion?.changeSummary ? ` · ${champion.changeSummary}` : ""}</p>
+                <div className="gl-facts">
+                  {describeSetup(policy).map((fact) => (
+                    <div key={fact} className="gl-fact"><i />{fact}</div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="gl-card">
+                <h3>History</h3>
+                <p className="sub">Every change to the setup is recorded and reversible.</p>
+                {history.length ? (
+                  <div className="gl-timeline">
+                    {[...history].reverse().map((record, index) => (
+                      <div key={`${record.approvedAt}-${index}`} className={`gl-event ${record.action}`}>
+                        <i />
+                        <div>
+                          <b>{record.action === "promote" ? `Adopted version ${versionName(record.toVersionId)}` : `Reverted to version ${versionName(record.toVersionId)}`}</b>
+                          <div><span>by {record.approvedBy} · {new Date(record.approvedAt).toLocaleString()}</span></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p className="muted">No changes yet — Entity is on the original setup.</p>}
+
+                {(canRevert || canUndoRevert) && (
                   <div className="gl-actions">
-                    <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>{live ? "Run live evaluation" : "Run evaluation"}</button>
-                    <label className="gl-live-toggle"><input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Run live (real inference, spends budget)</label>
+                    <input className="gl-approver" placeholder="Your name" value={approver} onChange={(event) => setApprover(event.target.value)} />
+                    {canRevert ? <button className="gl-btn small" disabled={Boolean(busy)} onClick={() => void act("rollback", { approvedBy: approver || "user" })}>Revert to previous setup</button> : null}
+                    {canUndoRevert ? <button className="gl-btn small ghost" disabled={Boolean(busy)} onClick={() => void act("undo_rollback", { approvedBy: approver || "user" })}>Undo the revert</button> : null}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
 
-                {report ? (
+          {/* ── Abilities ────────────────────────────────────────── */}
+          {tab === "abilities" && (
+            <div className="gl-split">
+              <div className="gl-list">
+                <h3>Awaiting you</h3>
+                {pendingAbilities.length ? pendingAbilities.map((ability) => (
+                  <div key={ability.id} className={`gl-row${selectedAbility === ability.id ? " is-active" : ""}`}>
+                    <button type="button" className="gl-row-main" onClick={() => setSelectedAbility(ability.id)}>
+                      <span className="gl-row-title">{ability.name}</span>
+                      <small>{ability.description}</small>
+                    </button>
+                  </div>
+                )) : <p className="muted" style={{ margin: "6px" }}>Nothing awaiting approval.</p>}
+
+                <h3>Approved</h3>
+                {approvedAbilities.length ? approvedAbilities.map((ability) => (
+                  <div key={ability.id} className={`gl-row${selectedAbility === ability.id ? " is-active" : ""}`}>
+                    <button type="button" className="gl-row-main" onClick={() => setSelectedAbility(ability.id)}>
+                      <span className="gl-row-title">{ability.name}</span>
+                      <small>{ability.description}</small>
+                    </button>
+                    <button type="button" className="gl-icon-btn" title="Remove ability" aria-label="Remove ability" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>
+                      <TrashIcon size={14} />
+                    </button>
+                  </div>
+                )) : <p className="muted" style={{ margin: "6px" }}>No approved abilities yet.</p>}
+              </div>
+
+              <div className="gl-detail">
+                {!selectedAbilityData ? (
+                  <div className="gl-empty">Pick an ability to see what it does.</div>
+                ) : (
                   <>
-                    <h4>Champion vs challenger</h4>
-                    <p className="muted">Judged on <strong>{report.targetMetric.replace(/_/g, " ")}</strong>: {pct(report.targetImprovementPct)} {report.targetImprovementPct >= 0 ? "better" : "worse"}.</p>
-                    <table className="gl-table">
-                      <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Δ</th></tr></thead>
-                      <tbody>
-                        <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td>{report.challengerQuality.toFixed(1)}</td><td className={report.qualityDeltaPct >= 0 ? "gl-up" : "gl-down"}>{pct(report.qualityDeltaPct)}</td></tr>
-                        <tr><td>Completion</td><td>{report.championCompletionPct.toFixed(0)}%</td><td>{report.challengerCompletionPct.toFixed(0)}%</td><td className={report.challengerCompletionPct >= report.championCompletionPct ? "gl-up" : "gl-down"}>{(report.challengerCompletionPct - report.championCompletionPct).toFixed(0)} pts</td></tr>
-                        <tr><td>Held-out deterministic</td><td>{report.championHeldOutPassRate.toFixed(0)}%</td><td>{report.challengerHeldOutPassRate.toFixed(0)}%</td><td className={report.challengerHeldOutPassRate >= report.championHeldOutPassRate ? "gl-up" : "gl-down"}>{(report.challengerHeldOutPassRate - report.championHeldOutPassRate).toFixed(0)} pts</td></tr>
-                        <tr><td>Cost (total)</td><td>${report.championCost.toFixed(2)}</td><td>${report.challengerCost.toFixed(2)}</td><td className={report.costDeltaPct <= 0 ? "gl-up" : "gl-down"}>{pct(report.costDeltaPct)}</td></tr>
-                        <tr><td>Latency (avg ms)</td><td>{report.championLatencyMs}</td><td>{report.challengerLatencyMs}</td><td /></tr>
-                        <tr><td>Human interventions</td><td>{report.championInterventions}</td><td>{report.challengerInterventions}</td><td /></tr>
-                      </tbody>
-                    </table>
-
-                    <h4>Gates</h4>
-                    {report.gates.map((gate) => (
-                      <div key={gate.name} className={`gl-gate ${gate.passed ? "pass" : "fail"}`}><i />{gate.name.replace(/_/g, " ")} <small>{gate.detail}</small></div>
-                    ))}
-
-                    <h4>Per-case results</h4>
-                    <table className="gl-table">
-                      <thead><tr><th>Case</th><th>Kind</th><th>Champ q</th><th>Chall q</th><th>Champ checks</th><th>Chall checks</th></tr></thead>
-                      <tbody>
-                        {detail?.evaluation?.cases.map((comparison) => (
-                          <tr key={comparison.caseId}>
-                            <td>{comparison.caseId}</td>
-                            <td>{comparison.kind}</td>
-                            <td>{comparison.champion.semanticScore.toFixed(1)}</td>
-                            <td>{comparison.challenger.semanticScore.toFixed(1)}</td>
-                            <td className={comparison.champion.deterministic.passed ? "gl-up" : "gl-down"}>{comparison.champion.deterministic.passed ? "pass" : "fail"}</td>
-                            <td className={comparison.challenger.deterministic.passed ? "gl-up" : "gl-down"}>{comparison.challenger.deterministic.passed ? "pass" : "fail"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {report.replayRegressions.length ? <p className="gl-down">Replay regressions: {report.replayRegressions.join(", ")}</p> : null}
-
+                    <div className="gl-detail-head">
+                      <span className={`gl-status ${selectedAbilityData.status === "approved" ? "promoted" : "draft"}`}>{selectedAbilityData.status === "approved" ? "Approved" : "Awaiting you"}</span>
+                      <h3>{selectedAbilityData.name}</h3>
+                    </div>
+                    <h4>What it does</h4>
+                    <p className="muted">{selectedAbilityData.description}</p>
                     <div className="gl-actions">
-                      <input className="gl-approver" placeholder="Your name (approver)" value={approver} onChange={(event) => setApprover(event.target.value)} />
-                      <button className="gl-btn primary" disabled={Boolean(busy) || proposal.status !== "ready_for_review" || !approver.trim()} onClick={() => void act("promote", { proposalId: proposal.proposalId, approvedBy: approver })}>
-                        {proposal.status === "promoted" ? "Promoted" : "Approve & promote"}
-                      </button>
-                      <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
-                      {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only a proposal that passes all gates can be promoted.</span> : null}
-                      {proposal.status === "ready_for_review" && proposal.autonomyTier === "auto" ? <span className="muted">Eligible for autonomous promotion (deterministic, held-out, low-risk) when autopilot is on.</span> : null}
-                      {proposal.autonomyTier === "protected" ? <span className="muted">Protected surface — this always requires your approval.</span> : null}
+                      {selectedAbilityData.status === "pending" ? (
+                        <>
+                          <input className="gl-approver" placeholder="Your name" value={approver} onChange={(event) => setApprover(event.target.value)} />
+                          <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", selectedAbilityData.id)}>Approve</button>
+                          <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", selectedAbilityData.id)}>Reject</button>
+                        </>
+                      ) : (
+                        <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", selectedAbilityData.id)}>Remove ability</button>
+                      )}
                     </div>
                   </>
-                ) : null}
-              </>
-            )}
-          </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </section>
     </div>
