@@ -7733,6 +7733,7 @@ input:focus-visible {
   height: 100% !important;
   min-height: 0 !important;
   margin: 0 !important;
+  padding-top: 10px !important;
   grid-column: 1 !important;
   grid-row: 1 !important;
   display: grid !important;
@@ -7743,8 +7744,8 @@ input:focus-visible {
   grid-row: 1 !important;
   position: relative;
   z-index: 2;
-  min-height: 44px !important;
-  padding: 4px 6px 12px 8px !important;
+  min-height: 0 !important;
+  padding: 0 6px 10px 8px !important;
   margin-bottom: 0 !important;
   background: #0d0d0e;
 }
