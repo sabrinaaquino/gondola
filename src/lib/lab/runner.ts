@@ -3,6 +3,7 @@ import { makeModel, createVeniceStreamFn } from "../venice-model";
 import { veniceJson } from "../venice";
 import { resolveRoutedModel } from "./apply";
 import { policyPromptBlock } from "./policy";
+import { createEvalTools } from "./eval-tools";
 import { JUDGE_CONFIG, type TaskRunInput, type TaskRunner } from "./evaluation";
 import { RUNTIME_VERSION, type LabConfig, type ModelCallRecord, type RunTrace, type ToolCallRecord, type TraceArtifact } from "./types";
 
@@ -34,6 +35,8 @@ export type RunAgentFn = (input: {
   task: string;
   systemPrompt: string;
   model: string;
+  tools?: AgentTool[];
+  workspaceDir?: string;
   signal?: AbortSignal;
 }) => Promise<AgentRun>;
 
@@ -66,6 +69,11 @@ export function createLiveTaskRunner(runAgent: RunAgentFn): TaskRunner {
       task: input.taskCase.task,
       systemPrompt: roleSystemPrompt(input.config),
       model,
+      // Give the evaluation agent the same kind of (budget-capped, auto-confirm)
+      // media tools the live agent has, so a challenger's workflow policy can
+      // manifest as a genuinely different tool sequence the graders can score.
+      tools: createEvalTools({ budgetUsd: input.config.workflowPolicy.budgetUsd }),
+      workspaceDir: input.workspaceDir,
     });
     const costUsd = round(run.modelCalls.reduce((sum, call) => sum + (call.costUsd || 0), 0));
     const artifacts: TraceArtifact[] = run.toolCalls
@@ -99,7 +107,7 @@ export function createLiveTaskRunner(runAgent: RunAgentFn): TaskRunner {
  * opt-in live evaluations and is not part of the offline test surface.
  */
 export function makeLiveRunAgent(options?: { tools?: AgentTool[]; maxTurns?: number }): RunAgentFn {
-  return async ({ task, systemPrompt, model, signal }) => {
+  return async ({ task, systemPrompt, model, tools, signal }) => {
     const startedAt = Date.now();
     const toolCalls: ToolCallRecord[] = [];
     const modelCalls: ModelCallRecord[] = [];
@@ -112,7 +120,7 @@ export function makeLiveRunAgent(options?: { tools?: AgentTool[]; maxTurns?: num
         systemPrompt,
         model: makeModel(model),
         thinkingLevel: "off",
-        tools: options?.tools ?? [],
+        tools: tools ?? options?.tools ?? [],
         messages: [],
       },
       streamFn: createVeniceStreamFn(30_000),
