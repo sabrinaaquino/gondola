@@ -139,7 +139,11 @@ const globalSessions = globalThis as typeof globalThis & {
 
 const sessions = globalSessions.__veniceAlienSessions ?? new Map<string, SessionState>();
 globalSessions.__veniceAlienSessions = sessions;
-const REQUIRED_BUILT_IN_TOOLS = ["search_web", "inspect_camera", "memory", "search_memory", "rewrite_self"];
+// Built-in tools whose absence marks a cached session as stale and forces a
+// rebuild, so a newly shipped capability loads into existing conversations too
+// (sessions live on globalThis and survive hot-reloads). Add self-capability
+// tools here when you introduce them, or they won't appear until a full restart.
+const REQUIRED_BUILT_IN_TOOLS = ["search_web", "inspect_camera", "memory", "search_memory", "rewrite_self", "set_model"];
 
 // Names a self-authored ability may never shadow (built-ins + coordination +
 // the self-extension tools themselves).
