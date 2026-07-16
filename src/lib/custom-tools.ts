@@ -37,6 +37,14 @@ export interface CustomToolDef {
   allowedTools: string[];
   /** Optional model override for this ability's worker; falls back to the default. */
   model?: string;
+  /**
+   * Governance gate. An authored ability is always "pending" and is NOT loaded
+   * into the live toolset until the owner approves it. Only "approved" abilities
+   * become callable. This is what keeps self-extension from being self-approval.
+   */
+  status: "pending" | "approved";
+  approvedAt?: string;
+  approvedBy?: string;
   createdAt: string;
 }
 
@@ -56,7 +64,13 @@ function serial<T>(operation: () => Promise<T>): Promise<T> {
 async function read(): Promise<CustomToolStore> {
   try {
     const parsed = JSON.parse(await readFile(FILE, "utf8")) as Partial<CustomToolStore>;
-    return { version: 1, tools: Array.isArray(parsed.tools) ? parsed.tools : [] };
+    const tools = (Array.isArray(parsed.tools) ? parsed.tools : []).map((tool) => ({
+      ...tool,
+      // Anything not explicitly approved is treated as pending, so nothing runs
+      // without approval even if the file was hand-edited or predates this field.
+      status: tool.status === "approved" ? "approved" : "pending",
+    })) as CustomToolDef[];
+    return { version: 1, tools };
   } catch {
     return { version: 1, tools: [] };
   }
@@ -95,9 +109,15 @@ function sanitizeAllowedTools(allowed: string[] | undefined): string[] {
   return [...new Set(cleaned)].slice(0, MAX_ALLOWED_TOOLS);
 }
 
-export async function listCustomTools(agentId?: string): Promise<CustomToolDef[]> {
+export async function listCustomTools(agentId?: string, status?: "pending" | "approved"): Promise<CustomToolDef[]> {
   const store = await read();
-  return agentId ? store.tools.filter((tool) => tool.agentId === agentId) : store.tools;
+  return store.tools.filter((tool) =>
+    (!agentId || tool.agentId === agentId) && (!status || tool.status === status));
+}
+
+/** Only the abilities the owner has approved (the set that becomes callable). */
+export async function listApprovedCustomTools(agentId?: string): Promise<CustomToolDef[]> {
+  return listCustomTools(agentId, "approved");
 }
 
 export async function createCustomTool(input: {
@@ -131,6 +151,8 @@ export async function createCustomTool(input: {
     playbook,
     allowedTools: sanitizeAllowedTools(input.allowedTools),
     ...(input.model?.trim() ? { model: input.model.trim().slice(0, 64) } : {}),
+    // Governance: born pending. It cannot run until the owner approves it.
+    status: "pending",
     createdAt: new Date().toISOString(),
   };
   return serial(async () => {
@@ -160,6 +182,32 @@ export async function deleteCustomTool(input: { agentId: string; name?: string; 
     if (store.tools.length === before) return false;
     await write(store);
     return true;
+  });
+}
+
+/**
+ * Owner approval: flip a pending ability to approved so it can be materialized
+ * into the live toolset. This is the human gate in the self-extension loop; the
+ * agent can author and test, but only an approval here makes an ability callable.
+ */
+export async function approveCustomTool(input: {
+  agentId: string;
+  id?: string;
+  name?: string;
+  approvedBy?: string;
+}): Promise<CustomToolDef | undefined> {
+  const targetName = input.name ? normalizeToolName(input.name) : undefined;
+  return serial(async () => {
+    const store = await read();
+    const tool = store.tools.find((candidate) =>
+      candidate.agentId === input.agentId
+      && ((input.id && candidate.id === input.id) || (targetName && candidate.name === targetName)));
+    if (!tool) return undefined;
+    tool.status = "approved";
+    tool.approvedAt = new Date().toISOString();
+    if (input.approvedBy?.trim()) tool.approvedBy = input.approvedBy.trim().slice(0, 80);
+    await write(store);
+    return tool;
   });
 }
 

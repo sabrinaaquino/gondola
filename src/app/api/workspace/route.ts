@@ -16,6 +16,7 @@ import {
   updateAgent,
 } from "@/lib/workspace";
 import { beginMcpOAuth, closeMcpConnection, discoverMcpServer } from "@/lib/mcp";
+import { approveCustomTool, deleteCustomTool, listCustomTools } from "@/lib/custom-tools";
 import { deleteTranscript } from "@/lib/transcript";
 import { resetAgentSession } from "@/lib/pi-agent";
 import { rejectUntrustedLocalRequest } from "@/lib/request-security";
@@ -263,6 +264,31 @@ export async function POST(request: Request) {
         });
         return Response.json({ server, error: "MCP connection failed" }, { status: 422 });
       }
+    }
+
+    if (action === "list_abilities") {
+      const abilities = await listCustomTools(typeof body.agentId === "string" ? body.agentId : undefined);
+      return Response.json({ abilities }, { headers: { "Cache-Control": "no-store" } });
+    }
+    if (action === "approve_ability") {
+      // The owner gate in the self-extension loop: only this promotes a pending
+      // ability to callable. The agent can author and test, never approve.
+      const ability = await approveCustomTool({
+        agentId: String(body.agentId ?? ""),
+        id: typeof body.id === "string" ? body.id : undefined,
+        name: typeof body.name === "string" ? body.name : undefined,
+        approvedBy: typeof body.approvedBy === "string" ? body.approvedBy : "owner",
+      });
+      if (!ability) return Response.json({ error: "Ability not found" }, { status: 404 });
+      return Response.json({ ability });
+    }
+    if (action === "delete_ability") {
+      const removed = await deleteCustomTool({
+        agentId: String(body.agentId ?? ""),
+        id: typeof body.id === "string" ? body.id : undefined,
+        name: typeof body.name === "string" ? body.name : undefined,
+      });
+      return Response.json({ ok: removed });
     }
 
     return Response.json({ error: "Unknown workspace action" }, { status: 400 });
