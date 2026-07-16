@@ -44,6 +44,24 @@ export interface SemanticEvaluation {
   rationale: string;
 }
 
+// What the explainable router recommended for a turn versus what actually ran.
+// Recorded so the outer loop can critique routing (was the pick honored? was it
+// cheaper/better?) without the acting runtime grading itself.
+export interface TraceRouting {
+  /** The model that actually ran (the primary candidate). */
+  selected: string;
+  /** The model the router would have chosen, if the registry was available. */
+  recommended?: string;
+  /** Whether the run used the router's recommendation. */
+  matched: boolean;
+  /** The routing preference used (e.g. balanced, cheapest). */
+  prefer: string;
+  /** What drove selection: a promoted champion config, or automatic/user default. */
+  source?: "champion" | "auto";
+  /** Human-readable rationale from the router. */
+  explanation: string;
+}
+
 export interface RunTrace {
   runId: string;
   runtimeVersion: string;
@@ -60,6 +78,8 @@ export interface RunTrace {
   latencyMs: number;
   completed: boolean;
   finalOutput: string;
+  /** Explainable routing recommendation vs. what ran (observe-mode). */
+  routing?: TraceRouting;
   deterministic?: DeterministicEvaluation;
   semantic?: SemanticEvaluation;
   finalized: boolean;

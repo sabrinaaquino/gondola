@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routeModel, toModelCapability, type ModelCapability } from "./model-registry";
+import { routeModel, routeModelLive, toModelCapability, type ModelCapability } from "./model-registry";
 
 const textFast: ModelCapability = {
   id: "fast-text", provider: "venice", type: "text",
@@ -51,6 +51,16 @@ test("routeModel returns no model with a clear explanation when nothing fits", (
   const result = routeModel({ needsReasoning: true, outputModalities: ["image"] }, registry);
   assert.equal(result.model, undefined);
   assert.ok(/No model satisfies/.test(result.explanation));
+});
+
+test("routeModelLive uses the cached registry and returns an explainable pick", async () => {
+  // Seed the process-global registry cache so no network call is made.
+  (globalThis as typeof globalThis & { __veniceModelRegistry?: { models: ModelCapability[]; expiresAt: number } })
+    .__veniceModelRegistry = { models: registry, expiresAt: Date.now() + 60_000 };
+  const result = await routeModelLive({ outputModalities: ["text"], prefer: "cheapest" });
+  assert.ok(result, "a routing result should be returned from the cached registry");
+  assert.equal(result.model, "fast-text");
+  assert.ok(result.explanation.includes("fast-text"));
 });
 
 test("toModelCapability derives modalities and flags from the catalog shape", () => {

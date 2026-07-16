@@ -3,8 +3,10 @@ import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
+  approveCustomTool,
   createCustomTool,
   deleteCustomTool,
+  listApprovedCustomTools,
   listCustomTools,
   materializeCustomTools,
   normalizeToolName,
@@ -42,6 +44,8 @@ test("creates, lists, and deletes a custom ability (roundtrip)", async () => {
     });
     assert.equal(def.name, "my_ability");
     assert.equal(def.description, "Do a thing");
+    // Governance: a newly authored ability is pending, never live.
+    assert.equal(def.status, "pending");
     // "Topic"/"topic" collapse; "9bad" is dropped for starting with a digit.
     assert.deepEqual(def.inputs, ["topic"]);
     // The author's allow-list is preserved verbatim; safety scoping happens at
@@ -79,6 +83,33 @@ test("rejects invalid names, duplicates, and reserved names", async () => {
   }
 });
 
+test("abilities are pending until approved, and only approved ones are listed as live", async () => {
+  const agentId = `test-${crypto.randomUUID()}`;
+  try {
+    await createCustomTool({ agentId, name: "gated_ability", description: "needs approval", playbook: "Do the thing." });
+
+    // Pending on creation: not part of the live (approved) set.
+    assert.equal((await listApprovedCustomTools(agentId)).length, 0);
+    assert.equal((await listCustomTools(agentId, "pending")).length, 1);
+
+    const approved = await approveCustomTool({ agentId, name: "gated_ability", approvedBy: "owner" });
+    assert.ok(approved);
+    assert.equal(approved.status, "approved");
+    assert.equal(approved.approvedBy, "owner");
+
+    // Now it counts as live.
+    const live = await listApprovedCustomTools(agentId);
+    assert.equal(live.length, 1);
+    assert.equal(live[0].name, "gated_ability");
+    assert.equal((await listCustomTools(agentId, "pending")).length, 0);
+
+    // Approving a missing ability is a no-op (returns undefined).
+    assert.equal(await approveCustomTool({ agentId, name: "does_not_exist" }), undefined);
+  } finally {
+    await deleteCustomTool({ agentId, name: "gated_ability" }).catch(() => undefined);
+  }
+});
+
 test("materializes a def into a callable tool exposing its inputs", () => {
   const def: CustomToolDef = {
     id: "1",
@@ -88,6 +119,7 @@ test("materializes a def into a callable tool exposing its inputs", () => {
     inputs: ["topic", "depth"],
     playbook: "Research then summarize.",
     allowedTools: ["search_web"],
+    status: "approved",
     createdAt: new Date().toISOString(),
   };
   const [tool] = materializeCustomTools([def], {
@@ -112,6 +144,7 @@ test("a maxed-out ability refuses to spawn instead of recursing", async () => {
     inputs: [],
     playbook: "Delegate widely.",
     allowedTools: ["orchestrate"],
+    status: "approved",
     createdAt: new Date().toISOString(),
   };
   const [tool] = materializeCustomTools([def], {

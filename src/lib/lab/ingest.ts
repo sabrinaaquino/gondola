@@ -1,5 +1,5 @@
 import { getChampion, saveTrace } from "./store";
-import { RUNTIME_VERSION, type ModelCallRecord, type RunTrace, type ToolCallRecord, type TraceArtifact } from "./types";
+import { RUNTIME_VERSION, type ModelCallRecord, type RunTrace, type ToolCallRecord, type TraceArtifact, type TraceRouting } from "./types";
 
 // Bridge from the live acting runtime into the Lab's immutable trace store.
 //
@@ -36,6 +36,8 @@ export interface LiveTraceInput {
   latencyMs: number;
   completed: boolean;
   finalOutput: string;
+  /** Explainable routing recommendation vs. what actually ran. */
+  routing?: TraceRouting;
 }
 
 /**
@@ -72,6 +74,7 @@ export async function recordLiveTrace(input: LiveTraceInput): Promise<RunTrace |
       latencyMs: Math.max(0, Math.round(input.latencyMs)),
       completed: input.completed,
       finalOutput: (input.finalOutput ?? "").slice(0, 4_000),
+      ...(input.routing ? { routing: input.routing } : {}),
       finalized: false,
       createdAt: new Date().toISOString(),
     };

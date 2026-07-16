@@ -228,3 +228,21 @@ export function routeModel(requirements: RoutingRequirements, models: ModelCapab
   const explanation = `Selected ${chosen.id} from ${compatible.length} compatible model${compatible.length === 1 ? "" : "s"} (preference: ${prefer}). Why: ${chosen.reasons.join("; ")}.`;
   return { model: chosen.id, explanation, candidates: candidates.slice(0, 6) };
 }
+
+/**
+ * Load the live registry and route in one call. Best-effort: returns undefined
+ * (never throws) when the registry is unavailable, so callers on the hot path
+ * can fall back to their existing static selection without risk.
+ */
+export async function routeModelLive(
+  requirements: RoutingRequirements,
+  signal?: AbortSignal,
+): Promise<RoutingResult | undefined> {
+  try {
+    const models = await loadModelRegistry(signal);
+    if (!models.length) return undefined;
+    return routeModel(requirements, models);
+  } catch {
+    return undefined;
+  }
+}
