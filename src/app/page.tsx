@@ -226,20 +226,10 @@ interface ConversationPayload {
 
 type RecordingPurpose = "conversation" | "dictation";
 
-function welcomeMessage(agentName: string): ChatMessage {
-  const introduction = agentName === "Entity"
-    ? "Hi, I’m Entity, the agent running inside Gondola. Entity is my current name, and you can give me another one whenever you like."
-    : `Hi, I’m ${agentName}.`;
-  return {
-    id: `welcome-${agentName}`,
-    role: "assistant",
-    text: `${introduction} Turn on the camera and I can look at you, or simply start a conversation. I can react, use assigned skills and tools, and create media with Venice.`,
-    createdAt: Date.now(),
-  };
-}
-
-function conversationMessages(messages: WorkspaceMessage[], agentName: string): ChatMessage[] {
-  if (!messages.length) return [welcomeMessage(agentName)];
+function conversationMessages(messages: WorkspaceMessage[]): ChatMessage[] {
+  // The agent never opens the conversation. An empty history stays empty (the
+  // neutral home state renders), so the first message is always the user's.
+  if (!messages.length) return [];
   return messages.filter((message) => !isInternalMediaConfirmation(message.text)).map((message) => ({
     id: message.id,
     role: message.role,
@@ -654,7 +644,7 @@ function Workspace() {
   const [visual, setVisual] = useState<VisualState>();
   const [audioLevel, setAudioLevel] = useState(0.06);
   const [viseme, setViseme] = useState<MouthViseme>("rest");
-  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage("Entity")]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const [artifacts, setArtifacts] = useState<MediaArtifact[]>([]);
   const [input, setInput] = useState("");
@@ -781,7 +771,7 @@ function Workspace() {
   const agentInitial = agentName.charAt(0).toUpperCase();
   // Fresh conversation (only the derived welcome message, no user turns yet):
   // show the centered home hero instead of a running transcript.
-  const isHome = messages.length === 1 && (messages[0]?.id?.startsWith("welcome-") ?? false) && !cameraPrompt;
+  const isHome = messages.length === 0 && !cameraPrompt;
   const homeTitle = agentName && agentName !== "Entity" ? `What should we explore, ${agentName}?` : "What should we explore?";
   const motionVisionModel = useMemo(() => {
     const supportsVideo = (model: CatalogModel) => model.capabilities?.supportsVideoInput === true || model.capabilities?.supportsVideo === true;
@@ -855,14 +845,12 @@ function Workspace() {
   }, []);
 
   const applyConversation = useCallback((payload: ConversationPayload, snapshot?: WorkspaceSnapshot) => {
-    const nextAgent = snapshot?.agents.find((agent) => agent.id === payload.conversation.agentId);
-    const nextName = nextAgent?.name ?? "Entity";
     revokeMediaUrls();
     setSessionId(payload.conversation.id);
     sessionIdRef.current = payload.conversation.id;
     setActiveAgentId(payload.conversation.agentId);
     setMessages([
-      ...conversationMessages(payload.messages, nextName),
+      ...conversationMessages(payload.messages),
       ...messageQueueRef.current
         .filter((item) => item.conversationId === payload.conversation.id)
         .map(queuedChatMessage),
@@ -2456,7 +2444,7 @@ function Workspace() {
           const refreshedPayload = await refreshed.json() as ConversationPayload & { error?: string };
           if (refreshed.ok && isActiveTurn()) {
             setMessages([
-              ...conversationMessages(refreshedPayload.messages, agentName),
+              ...conversationMessages(refreshedPayload.messages),
               ...messageQueueRef.current
                 .filter((item) => item.conversationId === turnConversationId)
                 .map(queuedChatMessage),
