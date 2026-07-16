@@ -26,6 +26,7 @@ import {
 } from "./evaluation";
 import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, reviewTraces } from "./reviewer";
 import { createLiveJudge, createLiveTaskRunner, makeLiveRunAgent } from "./runner";
+import { createEvalTools } from "./eval-tools";
 import type { ConfigVersion, EvaluationRecord, ImprovementProposal, RunTrace } from "./types";
 
 export async function ensureChampion(): Promise<ConfigVersion> {
@@ -110,7 +111,16 @@ export async function evaluateProposal(proposalId: string, opts?: { live?: boole
     cases: CASE_REGISTRY,
     seed: 1,
     reviewerVisibleCaseIds: reviewerVisibleCases().map((testCase) => testCase.id),
-    ...(opts?.live ? { runTask: createLiveTaskRunner(makeLiveRunAgent()), judge: createLiveJudge() } : {}),
+    ...(opts?.live
+      ? {
+        // The live runner instantiates each config's workflow policy (champion vs
+        // challenger behave differently), with real, budget-capped creative tools.
+        runTask: createLiveTaskRunner(makeLiveRunAgent(), {
+          buildTools: (config) => createEvalTools({ maxUsd: config.workflowPolicy.budgetUsd }),
+        }),
+        judge: createLiveJudge(),
+      }
+      : {}),
   });
   await saveProposal({
     ...proposal,

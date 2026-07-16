@@ -1,7 +1,9 @@
+import { mkdir } from "node:fs/promises";
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { makeModel, createVeniceStreamFn } from "../venice-model";
 import { veniceJson } from "../venice";
 import { resolveRoutedModel } from "./apply";
+import { policyPromptBlock } from "./policy";
 import { JUDGE_CONFIG, type TaskRunInput, type TaskRunner } from "./evaluation";
 import { RUNTIME_VERSION, type LabConfig, type ModelCallRecord, type RunTrace, type ToolCallRecord, type TraceArtifact } from "./types";
 
@@ -33,6 +35,10 @@ export type RunAgentFn = (input: {
   task: string;
   systemPrompt: string;
   model: string;
+  /** Clean, per-case working directory for file-oriented evaluation. */
+  workspaceDir?: string;
+  /** The toolset this run may use (built per-config by the caller). */
+  tools?: AgentTool[];
   signal?: AbortSignal;
 }) => Promise<AgentRun>;
 
@@ -50,13 +56,21 @@ function roleSystemPrompt(config: LabConfig): string {
  * Turn an injected agent run into a graded-ready RunTrace. Pure: no Venice calls,
  * so it is fully unit-testable with a fake RunAgentFn.
  */
-export function createLiveTaskRunner(runAgent: RunAgentFn): TaskRunner {
+export function createLiveTaskRunner(
+  runAgent: RunAgentFn,
+  options?: { buildTools?: (config: LabConfig) => AgentTool[] },
+): TaskRunner {
   return async (input: TaskRunInput): Promise<RunTrace> => {
     const model = resolveRoutedModel(input.config, "creator") ?? input.config.routing.defaultModel;
+    // Instantiate the config's workflow policy as real behavior, so champion and
+    // challenger are genuinely different operating agents, not just two ids.
+    const systemPrompt = [roleSystemPrompt(input.config), policyPromptBlock(input.config)].filter(Boolean).join("\n\n");
     const run = await runAgent({
       task: input.taskCase.task,
-      systemPrompt: roleSystemPrompt(input.config),
+      systemPrompt,
       model,
+      workspaceDir: input.workspaceDir,
+      tools: options?.buildTools?.(input.config),
     });
     const costUsd = round(run.modelCalls.reduce((sum, call) => sum + (call.costUsd || 0), 0));
     const artifacts: TraceArtifact[] = run.toolCalls
@@ -90,20 +104,21 @@ export function createLiveTaskRunner(runAgent: RunAgentFn): TaskRunner {
  * opt-in live evaluations and is not part of the offline test surface.
  */
 export function makeLiveRunAgent(options?: { tools?: AgentTool[]; maxTurns?: number }): RunAgentFn {
-  return async ({ task, systemPrompt, model, signal }) => {
+  return async ({ task, systemPrompt, model, signal, workspaceDir, tools }) => {
     const startedAt = Date.now();
     const toolCalls: ToolCallRecord[] = [];
     const modelCalls: ModelCallRecord[] = [];
     let text = "";
     let turns = 0;
     const maxTurns = options?.maxTurns ?? 8;
+    if (workspaceDir) await mkdir(workspaceDir, { recursive: true }).catch(() => undefined);
 
     const agent = new Agent({
       initialState: {
         systemPrompt,
         model: makeModel(model),
         thinkingLevel: "off",
-        tools: options?.tools ?? [],
+        tools: tools ?? options?.tools ?? [],
         messages: [],
       },
       streamFn: createVeniceStreamFn(30_000),
