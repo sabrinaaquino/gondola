@@ -3270,12 +3270,26 @@ function Workspace() {
     void playSpeech(`Hi, I’m ${agentName}. This is how I sound with the voice you selected.`);
   }, [agentName, clearSpeechQueue, playSpeech]);
 
+  // On small/mobile windows the sidebar becomes an off-canvas drawer that is
+  // closed by default (so the chat gets full width and stays scrollable). On
+  // wider windows we honor the user's saved collapse preference. Re-evaluated
+  // when crossing the breakpoint so resizing the window behaves correctly.
   useEffect(() => {
-    try {
-      setSidebarCollapsed(window.localStorage.getItem("nova.sidebarCollapsed") === "1");
-    } catch {
-      // Ignore storage access issues (e.g. private browsing).
-    }
+    const mobile = window.matchMedia("(max-width: 760px)");
+    const apply = () => {
+      if (mobile.matches) {
+        setSidebarCollapsed(true);
+        return;
+      }
+      try {
+        setSidebarCollapsed(window.localStorage.getItem("nova.sidebarCollapsed") === "1");
+      } catch {
+        setSidebarCollapsed(false);
+      }
+    };
+    apply();
+    mobile.addEventListener("change", apply);
+    return () => mobile.removeEventListener("change", apply);
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -3299,6 +3313,9 @@ function Workspace() {
           <PanelLeftIcon size={17} />
         </button>
       )}
+      {/* Tap-to-close scrim for the mobile sidebar drawer (hidden on desktop). */}
+      <button className="sidebar-scrim" onClick={toggleSidebar} aria-label="Close sidebar" tabIndex={-1} />
+
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><i /><i /><i /></span>

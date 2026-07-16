@@ -7802,3 +7802,84 @@ input:focus-visible {
 /* Transcript scrollbar: native overlay that appears only while scrolling
    (macOS), thin, translucent, and hugging the edge (no inset). */
 .transcript { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .1) transparent; }
+
+/* ==========================================================================
+   MOBILE / SMALL-WINDOW LAYOUT
+   The app is a fixed-height shell at every size, so the chat scrolls INTERNALLY
+   (header pinned top, composer pinned bottom, transcript scrolls between). Older
+   rules forced .conversation-panel to min-height:680px for a stacked, page-
+   scrolling layout — inside the fixed shell that clipped the chat and broke
+   scrolling on short/narrow windows. Neutralize that here, and turn the sidebar
+   into an off-canvas drawer on small windows so the chat gets full width.
+   ========================================================================== */
+.workspace.chat-only .conversation-panel {
+  min-height: 0 !important;
+  height: 100% !important;
+}
+.transcript {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* Tap-to-close scrim: only active behind the open mobile drawer. */
+.sidebar-scrim {
+  display: none;
+  border: 0;
+  padding: 0;
+}
+
+@media (max-width: 760px) {
+  /* Single column: the chat spans the full width; the sidebar overlays it. */
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .app-shell > .workspace,
+  .app-shell > .workspace.entity-hidden {
+    grid-column: 1 !important;
+  }
+
+  /* Sidebar as an off-canvas drawer. !important + child combinator beats the
+     older "sidebar becomes a top bar" rules (transform:none, display:none). */
+  .app-shell > .topbar {
+    position: fixed !important;
+    z-index: 80 !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: min(84vw, 300px) !important;
+    height: 100vh !important;
+    transition: transform .24s cubic-bezier(.2, .8, .2, 1);
+    will-change: transform;
+  }
+  .app-shell.sidebar-collapsed > .topbar {
+    transform: translateX(-102%) !important;
+    pointer-events: none !important;
+  }
+  .app-shell:not(.sidebar-collapsed) > .topbar {
+    transform: translateX(0) !important;
+    pointer-events: auto !important;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+  }
+
+  /* Restore the drawer chrome the old top-bar mobile rules hid/reflowed. */
+  .sidebar-reveal { display: inline-grid !important; }
+  .sidebar-collapse { display: inline-grid !important; }
+  .brand { border-bottom: 0 !important; }
+  .brand > div { display: block !important; }
+  .topbar-center { display: flex !important; flex-direction: column !important; }
+
+  /* Scrim behind the open drawer (tap to close). */
+  .app-shell:not(.sidebar-collapsed) .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgba(0, 0, 0, .5);
+    cursor: pointer;
+    animation: enter-up 160ms ease both;
+  }
+
+  /* Room for the reveal (hamburger) button over the chat header. */
+  .app-shell.sidebar-collapsed .conversation-header { padding-left: 52px !important; }
+}
