@@ -54,6 +54,15 @@ import { MAX_SUBAGENT_DEPTH, runSubAgent } from "./subagent";
 import { recordExperience } from "./skill-distiller";
 import { recordLiveTrace } from "./lab/ingest";
 import { routeModelLive, type RoutingResult } from "./model-registry";
+import {
+  createCustomTool,
+  listApprovedCustomTools,
+  listCustomTools,
+  materializeCustomTools,
+  normalizeToolName,
+  type CustomToolDef,
+  type MaterializeContext,
+} from "./custom-tools";
 import { createUserAgentMessage, retainUnansweredUserMessage } from "./agent-context";
 
 type Emit = (event: Record<string, unknown>) => void;
@@ -81,6 +90,8 @@ interface RuntimeContext {
   memoryScope: MemoryScope;
   /** Per-turn collector for the Lab trace bridge: tool outcomes + start time. */
   turnTrace?: { startedAt: number; toolCalls: { tool: string; ok: boolean; error?: string }[] };
+  /** Approved self-authored abilities to materialize for this session (never pending ones). */
+  customToolDefs?: CustomToolDef[];
 }
 
 /**
@@ -127,6 +138,16 @@ const globalSessions = globalThis as typeof globalThis & {
 const sessions = globalSessions.__veniceAlienSessions ?? new Map<string, SessionState>();
 globalSessions.__veniceAlienSessions = sessions;
 const REQUIRED_BUILT_IN_TOOLS = ["search_web", "inspect_camera", "memory", "search_memory", "rewrite_self"];
+
+// Names a self-authored ability may never shadow (built-ins + coordination +
+// the self-extension tools themselves).
+const RESERVED_TOOL_NAMES = [
+  "animate_avatar", "shape_presence", "memory", "search_memory", "rewrite_self",
+  "session_search", "search_web", "inspect_camera", "generate_image", "generate_video",
+  "generate_music", "delegate_task", "orchestrate", "read_file", "list_directory",
+  "create_directory", "write_file", "edit_file", "move_path", "delete_path",
+  "run_command", "use_skill", "create_ability", "test_ability",
+];
 
 const SYSTEM_PROMPT = `You are an expressive AI companion in a polished voice and vision interface.
 
@@ -859,10 +880,85 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     },
   };
 
+  const createAbilityTool: AgentTool = {
+    name: "create_ability",
+    label: "Create ability (needs approval)",
+    description: "Author a new reusable ability you are missing: a snake_case name, a one-line description of when to use it, a step-by-step playbook, optional named string inputs, and an allow-list of existing tool names the ability may use. The ability is saved as PENDING and CANNOT run until the owner approves it. Try it once with test_ability, then ask the owner to approve it. Use this when you notice a repeated multi-step task worth capturing.",
+    parameters: Type.Object({
+      name: Type.String({ minLength: 2, maxLength: 48, description: "snake_case ability name, unique among your abilities" }),
+      description: Type.String({ minLength: 3, maxLength: 300 }),
+      playbook: Type.String({ minLength: 10, maxLength: 8_000, description: "The steps the ability's worker should follow." }),
+      inputs: Type.Optional(Type.Array(Type.String({ maxLength: 32 }), { maxItems: 8, description: "Named string inputs the ability accepts." })),
+      allowed_tools: Type.Optional(Type.Array(Type.String({ maxLength: 48 }), { maxItems: 32, description: "Existing tool names the ability's worker may use." })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      if (runtime.subAgentDepth > 0) {
+        return { content: [{ type: "text", text: "Only the primary assistant can author abilities, not a worker sub-agent." }], details: { kind: "ability", action: "create", blocked: "subagent" } };
+      }
+      const input = params as { name: string; description: string; playbook: string; inputs?: string[]; allowed_tools?: string[] };
+      try {
+        const def = await createCustomTool({
+          agentId: runtime.agentId,
+          name: input.name,
+          description: input.description,
+          playbook: input.playbook,
+          inputs: input.inputs,
+          allowedTools: input.allowed_tools,
+          reservedNames: RESERVED_TOOL_NAMES,
+        });
+        return {
+          content: [{ type: "text", text: `Created the "${def.name}" ability. It is PENDING and cannot run until the owner approves it. Try it once with test_ability using sample inputs, then ask the owner to approve it.` }],
+          details: { kind: "ability", action: "created", name: def.name, id: def.id, status: def.status },
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: `I couldn't create that ability: ${error instanceof Error ? error.message : "unknown error"}` }], details: { kind: "ability", action: "create", ok: false } };
+      }
+    },
+  };
+
+  const testAbilityTool: AgentTool = {
+    name: "test_ability",
+    label: "Test an ability (sandboxed)",
+    description: "Run one of your abilities (pending or approved) once in a scoped, sandboxed worker to check it works before asking for approval. Safe: the worker cannot delete, overwrite whole files, run commands, spend on media, or change identity.",
+    parameters: Type.Object({
+      name: Type.String({ minLength: 2, maxLength: 48, description: "The ability to test." }),
+      inputs_json: Type.Optional(Type.String({ maxLength: 4_000, description: "A JSON object of the ability's named inputs, for example {\"topic\":\"otters\"}." })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, signal, onUpdate) {
+      if (runtime.subAgentDepth > 0) {
+        return { content: [{ type: "text", text: "Only the primary assistant can test abilities." }], details: { kind: "ability", action: "test", blocked: "subagent" } };
+      }
+      const input = params as { name: string; inputs_json?: string };
+      const defs = await listCustomTools(runtime.agentId);
+      const def = defs.find((candidate) => candidate.name === normalizeToolName(input.name));
+      if (!def) {
+        return { content: [{ type: "text", text: `You have no ability named "${input.name}". Create it first with create_ability.` }], details: { kind: "ability", action: "test", ok: false } };
+      }
+      let sampleInputs: Record<string, unknown> = {};
+      if (input.inputs_json) {
+        try {
+          const parsed = JSON.parse(input.inputs_json) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) sampleInputs = parsed as Record<string, unknown>;
+        } catch {
+          // Ignore malformed JSON; run the test with empty inputs.
+        }
+      }
+      const [tool] = materializeCustomTools([def], abilityContext(runtime));
+      const result = await tool.execute(crypto.randomUUID(), sampleInputs, signal, onUpdate);
+      return {
+        content: result.content,
+        details: { kind: "ability", action: "test", name: def.name, status: def.status, result: result.details },
+      };
+    },
+  };
+
   const builtInTools = [
     animateAvatar, shapePresence, memoryTool, searchMemoryTool, rewriteSelf, sessionSearchTool,
     webSearchTool, inspectCamera, imageTool, videoTool, musicTool, delegateTool,
     readFileTool, listDirectoryTool, createDirectoryTool, writeFileTool, editFileTool, movePathTool, deletePathTool, runCommandTool,
+    createAbilityTool, testAbilityTool,
   ];
   const skillTools: AgentTool[] = runtime.skills.length ? [{
     name: "use_skill",
@@ -882,14 +978,42 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
       };
     },
   }] : [];
+  // Approved self-authored abilities become callable tools. Pending ones are
+  // never loaded here; they only run through test_ability until the owner
+  // approves them. scopeToolsForWorker + per-ability depth checks keep them safe
+  // inside workers.
+  const abilityTools = runtime.customToolDefs?.length
+    ? materializeCustomTools(runtime.customToolDefs, abilityContext(runtime))
+    : [];
   return [
     ...builtInTools,
     ...skillTools,
+    ...abilityTools,
     ...createMcpAgentTools(runtime.mcpServers, {
       sessionId: runtime.sessionId,
       currentUserMessage: () => runtime.currentMessage ?? "",
     }),
   ];
+}
+
+// Build the materialization context for a runtime's approved abilities. An
+// ability runs as a scoped worker whose candidate tools come from the full
+// toolset (resolved to its allow-list), then re-scoped for safety by depth in
+// runSubAgent.
+function abilityContext(runtime: RuntimeContext): MaterializeContext {
+  return {
+    model: runtime.settings.chatModel,
+    parentDepth: runtime.subAgentDepth,
+    maxDepth: MAX_SUBAGENT_DEPTH,
+    emit: runtime.emit,
+    buildWorkerTools: (allowedNames, childDepth) => {
+      const childRuntime: RuntimeContext = { ...runtime, subAgentDepth: childDepth, currentMessage: undefined };
+      const all = createTools(childRuntime);
+      if (!allowedNames.length) return all;
+      const allow = new Set(allowedNames);
+      return all.filter((tool) => allow.has(tool.name));
+    },
+  };
 }
 
 function createSession(input: {
@@ -900,6 +1024,7 @@ function createSession(input: {
   profile: AgentProfile;
   skills: Skill[];
   mcpServers: McpServerConfig[];
+  customTools: CustomToolDef[];
   fingerprint: string;
   history: WorkspaceMessage[];
   transcript: AgentMessage[];
@@ -911,6 +1036,7 @@ function createSession(input: {
     settings: input.settings,
     skills: input.skills,
     mcpServers: input.mcpServers,
+    customToolDefs: input.customTools,
     emit: input.emit,
     subAgentDepth: 0,
     memoryScope: memoryScopeForAgent(input.profile),
@@ -1053,6 +1179,10 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   const conversation = await getConversation(input.sessionId).catch(() => undefined);
   const resources = await getAgentRuntime(conversation?.conversation.agentId ?? input.agentId ?? "");
   const memoryScope = memoryScopeForAgent(resources.agent);
+  // Load only APPROVED abilities and fold them into the session fingerprint, so
+  // approving or deleting one rebuilds the session and (un)loads the tool.
+  const customTools = await listApprovedCustomTools(resources.agent.id).catch(() => [] as CustomToolDef[]);
+  const runtimeFingerprint = `${resources.fingerprint}|abilities:${JSON.stringify(customTools.map((tool) => [tool.id, tool.name, tool.approvedAt ?? tool.createdAt]))}`;
   if (!input.hidden) await captureExplicitMemory(input.message, input.sessionId, memoryScope.agentId).catch(() => undefined);
   const memorySnapshot = await renderMemorySnapshot({ query: input.message, ...memoryScope });
   let session = sessions.get(input.sessionId);
@@ -1064,7 +1194,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
     sessions.delete(input.sessionId);
     session = undefined;
   }
-  if (session && session.fingerprint !== resources.fingerprint) {
+  if (session && session.fingerprint !== runtimeFingerprint) {
     if (session.agent.state.isStreaming) {
       session.agent.abort();
       await session.agent.waitForIdle();
@@ -1082,7 +1212,8 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
       profile: resources.agent,
       skills: resources.skills,
       mcpServers: resources.mcpServers,
-      fingerprint: resources.fingerprint,
+      customTools,
+      fingerprint: runtimeFingerprint,
       history: conversation?.messages ?? [],
       transcript,
     });
