@@ -6,6 +6,7 @@ import { getVersion, saveEvaluation, saveTrace } from "./store";
 import {
   RUNTIME_VERSION,
   type AgentRole,
+  type AutonomyTier,
   type CaseComparison,
   type ComparisonReport,
   type ConfigVersion,
@@ -18,6 +19,7 @@ import {
   type LabConfig,
   type ModelCallRecord,
   type PromotionThresholds,
+  type RiskLevel,
   type RoutingConfig,
   type RunGrade,
   type RunTrace,
@@ -421,6 +423,12 @@ function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], con
   const challengerQuality = round1(average(comparisons.map((comparison) => comparison.challenger.semanticScore)));
   const championCompletionPct = round1(average(comparisons.map((comparison) => (comparison.champion.completed ? 100 : 0))));
   const challengerCompletionPct = round1(average(comparisons.map((comparison) => (comparison.challenger.completed ? 100 : 0))));
+  // Deterministic (judge-free) pass rate on held-out cases — the trustworthy,
+  // paper-style regression signal that gates autonomous promotion.
+  const heldOutKinds = new Set<string>(["held_out", "replay"]);
+  const heldOut = comparisons.filter((comparison) => heldOutKinds.has(comparison.kind));
+  const championHeldOutPassRate = round1(average(heldOut.map((comparison) => (comparison.champion.deterministic.passed ? 100 : 0))));
+  const challengerHeldOutPassRate = round1(average(heldOut.map((comparison) => (comparison.challenger.deterministic.passed ? 100 : 0))));
   const championCost = round2(comparisons.reduce((total, comparison) => total + comparison.champion.costUsd, 0));
   const challengerCost = round2(comparisons.reduce((total, comparison) => total + comparison.challenger.costUsd, 0));
   const championLatencyMs = Math.round(average(comparisons.map((comparison) => comparison.champion.latencyMs)));
@@ -456,6 +464,7 @@ function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], con
     { name: "target_metric_improved", passed: targetImprovementPct >= PROMOTION_THRESHOLDS.minQualityImprovementPct, detail: `${targetMetric} ${targetImprovementPct}% vs required ${PROMOTION_THRESHOLDS.minQualityImprovementPct}%` },
     { name: "cost_within_tolerance", passed: costDeltaPct <= PROMOTION_THRESHOLDS.maxCostIncreasePct, detail: `cost ${costDeltaPct}% vs tolerance ${PROMOTION_THRESHOLDS.maxCostIncreasePct}%` },
     { name: "no_contamination", passed: contaminationFree, detail: contaminationFree ? "held-out cases were hidden from the generator" : "held-out contamination detected" },
+    { name: "heldout_deterministic_non_regression", passed: challengerHeldOutPassRate >= championHeldOutPassRate, detail: `held-out deterministic ${challengerHeldOutPassRate}% vs champion ${championHeldOutPassRate}%` },
   ];
   // When the target is not quality, guard the tradeoff: quality must not regress
   // beyond tolerance while chasing the other metric.
@@ -479,11 +488,36 @@ function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], con
     championInterventions,
     challengerInterventions,
     targetImprovementPct,
+    championHeldOutPassRate,
+    challengerHeldOutPassRate,
     replayRegressions,
     criticalRegressions,
     gates,
     readyForReview: gates.every((gate) => gate.passed),
   };
+}
+
+/**
+ * Classify how a passed proposal may be promoted. Autonomy is earned only on
+ * live, deterministic, held-out, non-regressive, low-risk evidence — the regime
+ * the Self-Harness loop can close without a human. Anything subjective
+ * (judge-based) or higher-risk stays with a human; non-workflow surfaces never
+ * auto-promote.
+ */
+export function autonomyTier(input: {
+  category: string;
+  riskLevel: RiskLevel;
+  targetMetric: string;
+  live: boolean;
+  report: ComparisonReport;
+}): AutonomyTier {
+  if (input.category !== "workflow_policy" || input.riskLevel === "high") return "protected";
+  const deterministicTarget = normalizeTargetMetric(input.targetMetric) !== "semantic_quality";
+  const heldOutOk = input.report.gates.find((gate) => gate.name === "heldout_deterministic_non_regression")?.passed === true;
+  if (input.live && input.report.readyForReview && deterministicTarget && heldOutOk && input.riskLevel === "low") {
+    return "auto";
+  }
+  return "human";
 }
 
 /** Re-run an evaluation from its stored inputs and versions; deterministic. */

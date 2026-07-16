@@ -306,6 +306,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 <h4>Hypothesis</h4>
                 <p className="muted">{proposal.hypothesis}</p>
                 <p className="muted">Evidence: {proposal.traceEvidence.length} trace(s) · target {proposal.targetMetric} · risk {proposal.riskLevel}</p>
+                {proposal.proposerFeedback ? <p className="muted">Proposer context: {proposal.proposerFeedback}</p> : null}
 
                 <h4>Configuration diff</h4>
                 {detail?.diff.length ? (
@@ -335,6 +336,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                       <tbody>
                         <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td>{report.challengerQuality.toFixed(1)}</td><td className={report.qualityDeltaPct >= 0 ? "gl-up" : "gl-down"}>{pct(report.qualityDeltaPct)}</td></tr>
                         <tr><td>Completion</td><td>{report.championCompletionPct.toFixed(0)}%</td><td>{report.challengerCompletionPct.toFixed(0)}%</td><td className={report.challengerCompletionPct >= report.championCompletionPct ? "gl-up" : "gl-down"}>{(report.challengerCompletionPct - report.championCompletionPct).toFixed(0)} pts</td></tr>
+                        <tr><td>Held-out deterministic</td><td>{report.championHeldOutPassRate.toFixed(0)}%</td><td>{report.challengerHeldOutPassRate.toFixed(0)}%</td><td className={report.challengerHeldOutPassRate >= report.championHeldOutPassRate ? "gl-up" : "gl-down"}>{(report.challengerHeldOutPassRate - report.championHeldOutPassRate).toFixed(0)} pts</td></tr>
                         <tr><td>Cost (total)</td><td>${report.championCost.toFixed(2)}</td><td>${report.challengerCost.toFixed(2)}</td><td className={report.costDeltaPct <= 0 ? "gl-up" : "gl-down"}>{pct(report.costDeltaPct)}</td></tr>
                         <tr><td>Latency (avg ms)</td><td>{report.championLatencyMs}</td><td>{report.challengerLatencyMs}</td><td /></tr>
                         <tr><td>Human interventions</td><td>{report.championInterventions}</td><td>{report.challengerInterventions}</td><td /></tr>
@@ -371,6 +373,8 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                       </button>
                       <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
                       {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only a proposal that passes all gates can be promoted.</span> : null}
+                      {proposal.status === "ready_for_review" && proposal.autonomyTier === "auto" ? <span className="muted">Eligible for autonomous promotion (deterministic, held-out, low-risk) when autopilot is on.</span> : null}
+                      {proposal.autonomyTier === "protected" ? <span className="muted">Protected surface — this always requires your approval.</span> : null}
                     </div>
                   </>
                 ) : null}

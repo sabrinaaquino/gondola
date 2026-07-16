@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { beforeEach, test } from "node:test";
 import {
+  autonomyTier,
   CASE_REGISTRY,
   JUDGE_CONFIG,
   PROMOTION_THRESHOLDS,
@@ -11,7 +12,7 @@ import {
   runEvaluation,
   type TaskRunner,
 } from "./evaluation";
-import { applyWorkflowPatch, assertAllowedProposalCategory, reviewReliability } from "./reviewer";
+import { applyWorkflowPatch, assertAllowedProposalCategory, proposalSignature, reviewReliability } from "./reviewer";
 import {
   createChallenger,
   getChampion,
@@ -23,6 +24,7 @@ import {
 import {
   evaluateProposal,
   generateProposal,
+  maybeAutoPromote,
   promoteProposal,
   rollback,
   seedDemo,
@@ -200,6 +202,83 @@ test("a semantic_quality target still gates on quality when it does not improve"
   const record = await runEvaluation({ proposalId: "p", championVersion: champion, challengerVersion: challenger, runTask: flat, targetMetric: "semantic_quality", persist: false });
   assert.equal(record.report.targetMetric, "semantic_quality");
   assert.equal(record.report.gates.find((gate) => gate.name === "target_metric_improved")?.passed, false);
+});
+
+test("the proposer skips an edit already recorded in feedback (proposer <-> Lab loop)", () => {
+  const champion = naiveChampionConfig();
+  const failing = (): RunTrace => ({
+    ...buildTrace("v", "a live user goal", { approved: true, concepts: 1, cost: 0, interventions: 0 }),
+    completed: false,
+    failureCategory: "timeout",
+  });
+  // Without feedback, repeated timeouts yield the fast-latency proposal.
+  assert.ok(reviewReliability([failing(), failing()], champion));
+  // With that edit already attempted, the proposer declines to repeat it.
+  const signature = proposalSignature("workflow_policy", { latencyMode: "fast" });
+  assert.equal(reviewReliability([failing(), failing()], champion, { avoidSignatures: [signature], preserved: [] }), null);
+});
+
+test("a generated proposal records the prior-outcome context that informed it", async () => {
+  await seedDemo();
+  const proposal = await generateProposal();
+  assert.ok(proposal?.proposerFeedback);
+  assert.match(proposal!.proposerFeedback!, /Preserving/);
+});
+
+test("the held-out deterministic gate blocks a challenger that regresses held-out pass rate", async () => {
+  const champion = await initChampion(naiveChampionConfig(), "init");
+  const challenger = await createChallenger(applyWorkflowPatch(champion.config, { useSeparateCritic: true }), { parentVersionId: champion.versionId, sourceProposalId: null, changeSummary: "c" });
+  const runner: TaskRunner = async (input) => {
+    const heldOut = input.taskCase.kind === "held_out" || input.taskCase.kind === "replay";
+    const approved = !(input.role === "challenger" && heldOut);
+    return buildTrace(input.configVersionId, input.taskCase.task, { approved, concepts: 3, cost: 0.2, interventions: 0 });
+  };
+  const record = await runEvaluation({ proposalId: "p", championVersion: champion, challengerVersion: challenger, runTask: runner, persist: false });
+  assert.ok(record.report.challengerHeldOutPassRate < record.report.championHeldOutPassRate);
+  assert.equal(record.report.gates.find((gate) => gate.name === "heldout_deterministic_non_regression")?.passed, false);
+  assert.equal(record.report.readyForReview, false);
+});
+
+test("autonomyTier grants autonomy only on deterministic, held-out, low-risk, live evidence", async () => {
+  const champion = await initChampion(naiveChampionConfig(), "init");
+  const challenger = await createChallenger(applyWorkflowPatch(champion.config, { latencyMode: "fast" }), { parentVersionId: champion.versionId, sourceProposalId: null, changeSummary: "fast" });
+  const runner: TaskRunner = async (input) => buildTrace(input.configVersionId, input.taskCase.task, { approved: true, concepts: 1, cost: 0.2, interventions: 0, completed: input.role === "challenger" });
+  const record = await runEvaluation({ proposalId: "p", championVersion: champion, challengerVersion: challenger, runTask: runner, targetMetric: "completion_rate", live: true, persist: false });
+  assert.equal(record.report.readyForReview, true);
+  const base = { category: "workflow_policy", riskLevel: "low" as const, targetMetric: "completion_rate", live: true, report: record.report };
+  assert.equal(autonomyTier(base), "auto");
+  assert.equal(autonomyTier({ ...base, targetMetric: "semantic_quality" }), "human"); // subjective judge -> human
+  assert.equal(autonomyTier({ ...base, live: false }), "human"); // offline simulation -> human
+  assert.equal(autonomyTier({ ...base, category: "model_routing" }), "protected"); // non-workflow surface -> never auto
+  assert.equal(autonomyTier({ ...base, riskLevel: "high" }), "protected"); // higher risk -> never auto
+});
+
+test("autopilot promotes an auto-tier proposal and never a human-tier one", async () => {
+  const previous = process.env.GONDOLA_LAB_AUTOPILOT;
+  process.env.GONDOLA_LAB_AUTOPILOT = "1";
+  try {
+    const champion = await initChampion(naiveChampionConfig(), "init");
+    const challenger = await createChallenger(applyWorkflowPatch(champion.config, { latencyMode: "fast" }), { parentVersionId: champion.versionId, sourceProposalId: "p-auto", changeSummary: "fast" });
+    const runner: TaskRunner = async (input) => buildTrace(input.configVersionId, input.taskCase.task, { approved: true, concepts: 1, cost: 0.2, interventions: 0, completed: input.role === "challenger" });
+    const record = await runEvaluation({ proposalId: "p-auto", championVersion: champion, challengerVersion: challenger, runTask: runner, targetMetric: "completion_rate", live: true });
+    assert.equal(record.report.readyForReview, true);
+    const makeProposal = (id: string, tier: "auto" | "human"): ImprovementProposal => ({
+      proposalId: id, sourceRunIds: [], observedProblem: "x", traceEvidence: [], hypothesis: "x",
+      category: "workflow_policy", configPatch: { latencyMode: "fast" }, targetMetric: "completion_rate",
+      expectedTradeoffs: "", riskLevel: "low", evaluationPlan: "", status: "ready_for_review",
+      challengerVersionId: challenger.versionId, evaluationId: record.evaluationId, autonomyTier: tier,
+      createdAt: new Date().toISOString(),
+    });
+    await saveProposal(makeProposal("p-human", "human"));
+    assert.equal(await maybeAutoPromote("p-human"), null);
+    assert.equal((await getChampion())?.versionId, champion.versionId);
+    await saveProposal(makeProposal("p-auto", "auto"));
+    assert.ok(await maybeAutoPromote("p-auto"), "auto-tier proposal should promote");
+    assert.equal((await getChampion())?.versionId, challenger.versionId);
+  } finally {
+    if (previous === undefined) delete process.env.GONDOLA_LAB_AUTOPILOT;
+    else process.env.GONDOLA_LAB_AUTOPILOT = previous;
+  }
 });
 
 test("cost tolerance violations block readiness", async () => {

@@ -17,6 +17,7 @@ import {
   undoRollbackChampion,
 } from "./store";
 import {
+  autonomyTier,
   CASE_REGISTRY,
   JUDGE_CONFIG,
   gradeDeterministic,
@@ -26,9 +27,17 @@ import {
   simulatedJudge,
   simulatedTaskRunner,
 } from "./evaluation";
-import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, reviewReliability, reviewTraces, type ProposalDraft } from "./reviewer";
+import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, proposalSignature, reviewReliability, reviewTraces, type ProposalDraft, type ProposerFeedback } from "./reviewer";
 import { createLiveJudge, createLiveTaskRunner, makeLiveRunAgent } from "./runner";
-import type { ConfigVersion, EvaluationRecord, ImprovementProposal, ProposalCategory, RunTrace } from "./types";
+import type { ConfigVersion, EvaluationRecord, ImprovementProposal, RunTrace } from "./types";
+
+// Behaviors the champion already gets right; every proposal must preserve them.
+// Fed to the proposer as the "records of passing behaviors" side of the loop.
+const PRESERVED_BEHAVIORS = [
+  "complete the task within budget",
+  "inspect media before animating",
+  "never animate an unapproved image",
+];
 
 export async function ensureChampion(): Promise<ConfigVersion> {
   const existing = await getChampion();
@@ -89,12 +98,27 @@ export async function generateProposal(hint?: string): Promise<ImprovementPropos
   const isDuplicate = (candidate: ProposalDraft) =>
     existing.some((proposal) => proposal.category === candidate.category && sameConfigPatch(proposal.configPatch, candidate.configPatch));
 
+  // The proposer <-> Lab loop: give the reviewers the outcomes of prior attempts
+  // (what to avoid) plus the behaviors to preserve, and record that context on
+  // the proposal so the dialogue is auditable and proposals stop rediscovering
+  // dead ends.
+  const feedback: ProposerFeedback = {
+    avoidSignatures: [...new Set(existing.map((proposal) => proposalSignature(proposal.category, proposal.configPatch)))],
+    preserved: PRESERVED_BEHAVIORS,
+  };
+  const rejectedCount = existing.filter((proposal) => proposal.status === "rejected" || proposal.status === "failed").length;
+  const feedbackNote = [
+    existing.length ? `Informed by ${existing.length} prior attempt(s).` : "First proposal in this lineage.",
+    rejectedCount ? `Avoiding ${rejectedCount} already-rejected edit(s).` : "",
+    `Preserving: ${PRESERVED_BEHAVIORS.join("; ")}.`,
+  ].filter(Boolean).join(" ");
+
   // Creative-quality review over reviewer-visible cases, then reliability review
   // over the live failure traces the supervisor tagged. Skip empty or duplicate
   // candidates and fall through to the next reviewer.
   const reviewers: Array<() => ProposalDraft | null> = [
-    () => reviewTraces(visibleTraces, champion.config),
-    () => reviewReliability(allTraces, champion.config),
+    () => reviewTraces(visibleTraces, champion.config, feedback),
+    () => reviewReliability(allTraces, champion.config, feedback),
   ];
   let draft: ProposalDraft | null = null;
   for (const review of reviewers) {
@@ -118,6 +142,7 @@ export async function generateProposal(hint?: string): Promise<ImprovementPropos
     ...(trimmedHint ? { observedProblem: `${draft.observedProblem} (Flagged by the agent: ${trimmedHint})` } : {}),
     proposalId,
     challengerVersionId: challenger.versionId,
+    proposerFeedback: feedbackNote,
     status: "draft",
     createdAt: new Date().toISOString(),
   };
@@ -148,27 +173,18 @@ export function autopilotEnabled(): boolean {
   return process.env.GONDOLA_LAB_AUTOPILOT === "1";
 }
 
-// Categories the autopilot may promote unattended: narrow, reversible, and never
-// touching permissions, credentials, budget, graders, thresholds, or code.
-const AUTO_PROMOTABLE_CATEGORIES: ProposalCategory[] = ["workflow_policy"];
-
 /**
  * Promote a passed proposal without a human ONLY when autopilot is enabled and
- * the proposal is low-risk and in an auto-promotable category. Returns the
- * promoted version, or null when autopilot is off or the proposal is ineligible.
- * A rollback is always available afterward, and the promotion is audited under
- * the "gondola-auto" approver.
+ * the proposal earned the "auto" autonomy tier (deterministic, held-out,
+ * non-regressive, low-risk, live evidence — computed at evaluation time).
+ * Everything else waits for a human. A rollback is always available afterward,
+ * and the promotion is audited under the "gondola-auto" approver.
  */
 export async function maybeAutoPromote(proposalId: string): Promise<ConfigVersion | null> {
   if (!autopilotEnabled()) return null;
   const proposal = await getProposal(proposalId);
   if (!proposal || proposal.status !== "ready_for_review") return null;
-  if (proposal.riskLevel !== "low") return null;
-  if (!AUTO_PROMOTABLE_CATEGORIES.includes(proposal.category)) return null;
-  // Only auto-promote on real evidence. A pass from the offline simulation is
-  // never enough to promote a live-behavior change unattended.
-  const evaluation = proposal.evaluationId ? await getEvaluation(proposal.evaluationId) : undefined;
-  if (!evaluation?.live) return null;
+  if (proposal.autonomyTier !== "auto") return null;
   return promoteProposal(proposalId, "gondola-auto").catch(() => null);
 }
 
@@ -196,14 +212,23 @@ export async function evaluateProposal(proposalId: string, opts?: { live?: boole
     live: opts?.live === true,
     ...(opts?.live ? { runTask: createLiveTaskRunner(makeLiveRunAgent()), judge: createLiveJudge() } : {}),
   });
+  const tier = autonomyTier({
+    category: proposal.category,
+    riskLevel: proposal.riskLevel,
+    targetMetric: proposal.targetMetric,
+    live: record.live === true,
+    report: record.report,
+  });
   await saveProposal({
     ...proposal,
     status: record.report.readyForReview ? "ready_for_review" : "failed",
     evaluationId: record.evaluationId,
+    autonomyTier: tier,
   });
-  // Bounded autonomy: with autopilot on, a low-risk proposal that passed all
-  // gates is promoted automatically (audited, reversible). Off by default, so
-  // promotion stays human-gated unless the owner opts in.
+  // Bounded autonomy: with autopilot on, an "auto"-tier proposal (deterministic,
+  // held-out, non-regressive, low-risk, live) is promoted automatically (audited,
+  // reversible). Off by default, so promotion stays human-gated unless the owner
+  // opts in, and subjective/protected changes always wait for a human.
   if (record.report.readyForReview) await maybeAutoPromote(proposalId).catch(() => null);
   return record;
 }

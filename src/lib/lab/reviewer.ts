@@ -50,14 +50,29 @@ function animatedUnapproved(trace: RunTrace): boolean {
   return !(analyze !== -1 && analyze < video);
 }
 
-export type ProposalDraft = Omit<ImprovementProposal, "proposalId" | "createdAt" | "status" | "challengerVersionId" | "evaluationId">;
+export type ProposalDraft = Omit<ImprovementProposal, "proposalId" | "createdAt" | "status" | "challengerVersionId" | "evaluationId" | "proposerFeedback" | "autonomyTier">;
+
+export interface ProposerFeedback {
+  /** category:patch signatures already attempted — do not re-propose these. */
+  avoidSignatures: string[];
+  /** Behaviors the champion already gets right; a proposal must not regress them. */
+  preserved: string[];
+}
+
+/** Stable signature for an attempted edit, so the proposer can avoid repeats. */
+export function proposalSignature(category: string, patch: Partial<WorkflowPolicy>): string {
+  const normalized = JSON.stringify(
+    Object.fromEntries(Object.entries(patch).sort(([a], [b]) => a.localeCompare(b))),
+  );
+  return `${category}:${normalized}`;
+}
 
 /**
  * Inspect finalized traces (trigger + validation only; held-out cases are never
  * shown to the reviewer) and, if a bounded improvement is warranted, return a
  * single workflow-policy proposal. Never edits the champion.
  */
-export function reviewTraces(traces: RunTrace[], champion: LabConfig): ProposalDraft | null {
+export function reviewTraces(traces: RunTrace[], champion: LabConfig, feedback?: ProposerFeedback): ProposalDraft | null {
   if (!traces.length) return null;
   const evidence = new Set<string>();
   const problems: string[] = [];
@@ -91,6 +106,8 @@ export function reviewTraces(traces: RunTrace[], champion: LabConfig): ProposalD
   }
 
   if (!Object.keys(patch).length) return null;
+  // The proposer <-> Lab loop: never re-propose an edit already attempted.
+  if (feedback?.avoidSignatures.includes(proposalSignature("workflow_policy", patch))) return null;
 
   return {
     sourceRunIds: [...evidence],
@@ -112,7 +129,7 @@ export function reviewTraces(traces: RunTrace[], champion: LabConfig): ProposalD
  * the acting agent will actually feel through the policy -> behavior mapping.
  * Currently: repeated timeouts -> switch the workflow to fast latency mode.
  */
-export function reviewReliability(traces: RunTrace[], champion: LabConfig): ProposalDraft | null {
+export function reviewReliability(traces: RunTrace[], champion: LabConfig, feedback?: ProposerFeedback): ProposalDraft | null {
   const failures = traces.filter((trace) => trace.failureCategory);
   if (failures.length < 2) return null;
 
@@ -124,6 +141,7 @@ export function reviewReliability(traces: RunTrace[], champion: LabConfig): Prop
 
   const timeouts = byCategory.get("timeout") ?? [];
   if (timeouts.length >= 2 && champion.workflowPolicy.latencyMode !== "fast") {
+    if (feedback?.avoidSignatures.includes(proposalSignature("workflow_policy", { latencyMode: "fast" }))) return null;
     const evidence = timeouts.map((trace) => trace.runId);
     return {
       sourceRunIds: evidence,
