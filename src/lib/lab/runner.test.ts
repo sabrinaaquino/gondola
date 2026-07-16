@@ -55,6 +55,36 @@ test("createLiveTaskRunner passes the resolved model to the agent run", async ()
   assert.equal(seenModel, "creator-model");
 });
 
+test("createLiveTaskRunner instantiates the config's policy and threads the workspace + tools", async () => {
+  // Neutral config -> no policy directives in the prompt.
+  let neutralPrompt = "";
+  await createLiveTaskRunner(async ({ systemPrompt }) => {
+    neutralPrompt = systemPrompt;
+    return { text: "ok", toolCalls: [], modelCalls: [], latencyMs: 1, completed: true };
+  })({ config: config(), taskCase, workspaceDir: "/tmp/x", role: "champion", configVersionId: "v1", seed: 1 });
+  assert.doesNotMatch(neutralPrompt, /Active workflow policy/);
+
+  // Challenger with a policy -> the directive shows up, the workspace + tools are threaded.
+  const challenger = config();
+  challenger.workflowPolicy.requireAnalyzeBeforeAnimate = true;
+  let prompt = "";
+  let workspace: string | undefined;
+  let toolNames: string[] = [];
+  const runner = createLiveTaskRunner(
+    async ({ systemPrompt, workspaceDir, tools }) => {
+      prompt = systemPrompt;
+      workspace = workspaceDir;
+      toolNames = (tools ?? []).map((tool) => tool.name);
+      return { text: "ok", toolCalls: [], modelCalls: [], latencyMs: 1, completed: true };
+    },
+    { buildTools: () => [{ name: "generate_image", label: "", description: "", parameters: {} as never, async execute() { return { content: [], details: {} }; } }] },
+  );
+  await runner({ config: challenger, taskCase, workspaceDir: "/tmp/eval-x", role: "challenger", configVersionId: "v2", seed: 1 });
+  assert.match(prompt, /analyze_media/);
+  assert.equal(workspace, "/tmp/eval-x");
+  assert.deepEqual(toolNames, ["generate_image"]);
+});
+
 test("parseJudgeScore reads a labeled score, a bare number, and clamps to 0-10", () => {
   assert.equal(parseJudgeScore('{"score": 7.5}'), 7.5);
   assert.equal(parseJudgeScore("Score = 9"), 9);
