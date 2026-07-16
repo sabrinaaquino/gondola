@@ -1,0 +1,44 @@
+name: Gondola PR Review
+
+# Runs Gondola's automated Venice-powered review on every pull request: it posts
+# a persistent summary comment and inline findings, guided by
+# .github/gondola-review-guidelines.md.
+#
+# Security: uses pull_request_target so the review can run with repository
+# secrets even for fork PRs. It is safe ONLY because it never checks out or
+# executes the PR's code — it checks out the trusted base branch (for the
+# reviewer script + policy files) and reads the PR diff through the GitHub API.
+# Do NOT add steps that check out the PR head or run its build/scripts here.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: gondola-review-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Review the pull request
+        env:
+          VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.number }}
+          VENICE_REVIEW_MODEL: ${{ vars.VENICE_REVIEW_MODEL }}
+        run: node .github/scripts/review-pr.mjs
