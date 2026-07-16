@@ -227,7 +227,7 @@ type RecordingPurpose = "conversation" | "dictation";
 
 function welcomeMessage(agentName: string): ChatMessage {
   const introduction = agentName === "Entity"
-    ? "Hi, I’m your Entity. I don’t have a name yet. What would you like to call me?"
+    ? "Hi, I’m Entity, the agent running inside Gondola. Entity is my current name, and you can give me another one whenever you like."
     : `Hi, I’m ${agentName}.`;
   return {
     id: `welcome-${agentName}`,

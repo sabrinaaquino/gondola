@@ -67,8 +67,8 @@ function defaultAgent(): AgentProfile {
   return {
     id: DEFAULT_AGENT_ID,
     name: "Entity",
-    description: "An unnamed, perceptive voice and vision companion.",
-    instructions: "Be warm, observant, concise, and natural in spoken conversation. You do not have a chosen name yet; invite the user to name you at a natural moment, then use rewrite_self to persist the name they choose.",
+    description: "A perceptive voice and vision companion.",
+    instructions: "Be warm, observant, concise, and natural in spoken conversation. Entity is your current default name; treat it as your name and never say you have no name. Invite the user to give you a name at a natural moment, then use rewrite_self to persist the name they approve.",
     skillIds: [],
     mcpServerIds: [],
     createdAt: timestamp,
