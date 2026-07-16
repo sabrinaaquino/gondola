@@ -235,10 +235,20 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
             <h3>Proposals</h3>
             {snapshot?.proposals.length
               ? snapshot.proposals.map((item) => (
-                <button key={item.proposalId} className={`gl-prop${selected === item.proposalId ? " is-active" : ""}`} onClick={() => setSelected(item.proposalId)}>
-                  <span className={`gl-status ${item.status}`}>{item.status.replace(/_/g, " ")}</span>
-                  <small>{item.observedProblem}</small>
-                </button>
+                <div key={item.proposalId} className={`gl-prop${selected === item.proposalId ? " is-active" : ""}`}>
+                  <button type="button" onClick={() => setSelected(item.proposalId)} style={{ all: "unset", display: "block", width: "100%", cursor: "pointer" }}>
+                    <span className={`gl-status ${item.status}`}>{item.status.replace(/_/g, " ")}</span>
+                    <small>{item.observedProblem}</small>
+                  </button>
+                  <div className="gl-mini">
+                    <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => {
+                      const id = item.proposalId;
+                      void act("delete_proposal", { proposalId: id }).then(() => {
+                        if (selected === id) { setSelected(""); setDetail(null); }
+                      });
+                    }}>Delete</button>
+                  </div>
+                </div>
               ))
               : <p className="muted" style={{ margin: "6px" }}>No proposals yet. Seed a run, then generate one.</p>}
             <h3>Pending abilities</h3>
@@ -254,6 +264,19 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 </div>
               ))
               : <p className="muted" style={{ margin: "6px" }}>No abilities awaiting approval.</p>}
+
+            <h3>Approved abilities</h3>
+            {abilities.filter((ability) => ability.status === "approved").length
+              ? abilities.filter((ability) => ability.status === "approved").map((ability) => (
+                <div key={ability.id} className="gl-prop" style={{ cursor: "default" }}>
+                  <small style={{ marginTop: 0, color: "var(--ink)" }}>{ability.name}</small>
+                  <small>{ability.description}</small>
+                  <div className="gl-mini">
+                    <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>Remove</button>
+                  </div>
+                </div>
+              ))
+              : <p className="muted" style={{ margin: "6px" }}>No approved abilities yet.</p>}
 
             <h3>Recent traces</h3>
             {snapshot?.traces.slice(0, 6).map((trace) => (

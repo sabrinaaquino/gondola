@@ -1,5 +1,6 @@
 import { rejectUntrustedLocalRequest } from "@/lib/request-security";
 import {
+  deleteProposal,
   evaluateProposal,
   generateProposal,
   getLabSnapshot,
@@ -55,6 +56,9 @@ export async function POST(request: Request) {
     }
     if (action === "reject") {
       return Response.json({ proposal: await rejectProposal(String(body.proposalId ?? "")) });
+    }
+    if (action === "delete_proposal") {
+      return Response.json({ deleted: await deleteProposal(String(body.proposalId ?? "")) });
     }
     if (action === "rollback") {
       const version = await rollback(String(body.approvedBy ?? "user"));
