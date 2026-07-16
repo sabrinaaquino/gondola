@@ -261,7 +261,7 @@ export function SettingsDrawer({
                     models={groups.tts}
                     onChange={updateVoiceModel}
                   />
-                  <ModelSelect label="Conversation" hint="Pi agent" value={settings.chatModel} models={groups.chat} onChange={(value) => update("chatModel", value)} />
+                  <ModelSelect label="Conversation" hint="Reasoning and chat" value={settings.chatModel} models={groups.chat} onChange={(value) => update("chatModel", value)} />
                   <ModelSelect label="Camera vision" hint="Expressions and objects" value={settings.visionModel} models={groups.vision} onChange={(value) => update("visionModel", value)} />
                   <ModelSelect label="Transcription" hint="Voice to text" value={settings.sttModel} models={groups.asr} onChange={(value) => update("sttModel", value)} />
                   <ModelSelect label="Images" hint="Creative studio" value={settings.imageModel} models={groups.image} onChange={(value) => update("imageModel", value)} />
