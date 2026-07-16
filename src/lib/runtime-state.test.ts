@@ -100,7 +100,14 @@ function sampleSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapsh
       recentProposals: [{ id: "p-1", status: "rejected", summary: "image-to-video failed" }],
       activePolicies: ["Analyze media before animating."],
     },
-    approvals: { pending: [], sessionGrants: [] },
+    approvals: { pending: [], sessionGrants: [], guardedTools: [{ tool: "run_command", risk: "high" }] },
+    architecture: {
+      version: "1.0.0",
+      purpose: "Gondola is an experiment in operational intelligence.",
+      principles: [{ title: "Evidence over assertion", text: "traces, not opinion" }],
+      roles: [{ role: "Entity", responsibility: "acts on goals", boundary: "needs approval for protected change" }],
+      subsystems: [{ name: "Runtime introspection", purpose: "authoritative live state" }],
+    },
     environment: {
       workspacePath: "/tmp/ws",
       os: "Darwin 25.5.0",

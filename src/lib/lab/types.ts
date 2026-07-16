@@ -260,6 +260,8 @@ export interface ComparisonReport {
   championQuality: number;
   challengerQuality: number;
   qualityDeltaPct: number;
+  championCompletionPct: number;
+  challengerCompletionPct: number;
   championCost: number;
   challengerCost: number;
   costDeltaPct: number;
@@ -267,6 +269,8 @@ export interface ComparisonReport {
   challengerLatencyMs: number;
   championInterventions: number;
   challengerInterventions: number;
+  /** Improvement (positive = better) for the declared target metric. */
+  targetImprovementPct: number;
   replayRegressions: string[];
   criticalRegressions: string[];
   gates: GateResult[];

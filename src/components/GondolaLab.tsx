@@ -329,10 +329,12 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 {report ? (
                   <>
                     <h4>Champion vs challenger</h4>
+                    <p className="muted">Judged on <strong>{report.targetMetric.replace(/_/g, " ")}</strong>: {pct(report.targetImprovementPct)} {report.targetImprovementPct >= 0 ? "better" : "worse"}.</p>
                     <table className="gl-table">
                       <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Δ</th></tr></thead>
                       <tbody>
                         <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td>{report.challengerQuality.toFixed(1)}</td><td className={report.qualityDeltaPct >= 0 ? "gl-up" : "gl-down"}>{pct(report.qualityDeltaPct)}</td></tr>
+                        <tr><td>Completion</td><td>{report.championCompletionPct.toFixed(0)}%</td><td>{report.challengerCompletionPct.toFixed(0)}%</td><td className={report.challengerCompletionPct >= report.championCompletionPct ? "gl-up" : "gl-down"}>{(report.challengerCompletionPct - report.championCompletionPct).toFixed(0)} pts</td></tr>
                         <tr><td>Cost (total)</td><td>${report.championCost.toFixed(2)}</td><td>${report.challengerCost.toFixed(2)}</td><td className={report.costDeltaPct <= 0 ? "gl-up" : "gl-down"}>{pct(report.costDeltaPct)}</td></tr>
                         <tr><td>Latency (avg ms)</td><td>{report.championLatencyMs}</td><td>{report.challengerLatencyMs}</td><td /></tr>
                         <tr><td>Human interventions</td><td>{report.championInterventions}</td><td>{report.challengerInterventions}</td><td /></tr>

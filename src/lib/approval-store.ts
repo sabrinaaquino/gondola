@@ -15,6 +15,26 @@ const MAX_RECORDS = 300;
 
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 export type ApprovalScope = "once" | "session";
+export type ToolRisk = "low" | "medium" | "high";
+
+// Declarative source of truth for which tools are destructive and their risk.
+// The gate enforces approval; this makes the guarded set explicit, exposes it to
+// the owner (what can be granted for a session) and the runtime, and tags the
+// audit trail with a risk level.
+export const GUARDED_TOOLS: Record<string, ToolRisk> = {
+  delete_path: "high",
+  run_command: "high",
+  write_file: "medium",
+  move_path: "medium",
+};
+
+export function toolRisk(tool: string): ToolRisk | undefined {
+  return GUARDED_TOOLS[tool];
+}
+
+export function guardedToolList(): { tool: string; risk: ToolRisk }[] {
+  return Object.entries(GUARDED_TOOLS).map(([tool, risk]) => ({ tool, risk }));
+}
 
 export interface ApprovalRecord {
   id: string;
@@ -23,6 +43,7 @@ export interface ApprovalRecord {
   summary: string;
   status: ApprovalStatus;
   scope: ApprovalScope;
+  risk?: ToolRisk;
   createdAt: string;
   decidedAt?: string;
   decidedBy?: string;
@@ -90,6 +111,7 @@ export async function recordApprovalRequest(input: { conversationId: string; too
     summary: input.summary.slice(0, 300),
     status: "pending",
     scope: "once",
+    risk: toolRisk(input.tool),
     createdAt: now,
   };
   return serial(async () => {
@@ -110,6 +132,7 @@ export async function recordApprovalDecision(input: { conversationId: string; to
     summary: input.summary.slice(0, 300),
     status: input.status,
     scope: "once",
+    risk: toolRisk(input.tool),
     createdAt: now,
     decidedAt: now,
     decidedBy: input.decidedBy ?? "owner",

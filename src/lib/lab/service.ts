@@ -192,6 +192,7 @@ export async function evaluateProposal(proposalId: string, opts?: { live?: boole
     cases: CASE_REGISTRY,
     seed: 1,
     reviewerVisibleCaseIds: reviewerVisibleCases().map((testCase) => testCase.id),
+    targetMetric: proposal.targetMetric,
     live: opts?.live === true,
     ...(opts?.live ? { runTask: createLiveTaskRunner(makeLiveRunAgent()), judge: createLiveJudge() } : {}),
   });

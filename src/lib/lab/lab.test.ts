@@ -33,7 +33,7 @@ beforeEach(() => {
   process.env.GONDOLA_LAB_ROOT = mkdtempSync(path.join(os.tmpdir(), "gondola-lab-test-"));
 });
 
-function buildTrace(configVersionId: string, goal: string, opts: { approved: boolean; concepts: number; cost: number; interventions: number }): RunTrace {
+function buildTrace(configVersionId: string, goal: string, opts: { approved: boolean; concepts: number; cost: number; interventions: number; completed?: boolean }): RunTrace {
   const modelCalls = Array.from({ length: opts.concepts }, () => ({ model: "m", purpose: "concept", costUsd: 0, latencyMs: 100 }));
   const toolCalls: ToolCallRecord[] = opts.approved
     ? [{ tool: "analyze_media", ok: true }, { tool: "generate_video", ok: true }]
@@ -52,7 +52,7 @@ function buildTrace(configVersionId: string, goal: string, opts: { approved: boo
     humanInterventions: opts.interventions,
     costUsd: opts.cost,
     latencyMs: 100,
-    completed: true,
+    completed: opts.completed ?? true,
     finalOutput: "x",
     finalized: false,
     createdAt: new Date().toISOString(),
@@ -169,6 +169,37 @@ test("replay regressions block readiness", async () => {
   assert.ok(record.report.replayRegressions.includes("replay-titlecard"));
   assert.equal(record.report.gates.find((gate) => gate.name === "no_replay_regression")?.passed, false);
   assert.equal(record.report.readyForReview, false);
+});
+
+test("evaluation measures the proposal's declared target metric (completion, not quality)", async () => {
+  const champion = await initChampion(naiveChampionConfig(), "init");
+  const challenger = await createChallenger(applyWorkflowPatch(champion.config, { latencyMode: "fast" }), {
+    parentVersionId: champion.versionId, sourceProposalId: null, changeSummary: "fast",
+  });
+  // Equal quality on both sides; only completion differs (champion fails, challenger completes).
+  const runner: TaskRunner = async (input) => buildTrace(input.configVersionId, input.taskCase.task, {
+    approved: true, concepts: 1, cost: 0.2, interventions: 0, completed: input.role === "challenger",
+  });
+  const record = await runEvaluation({
+    proposalId: "p", championVersion: champion, challengerVersion: challenger,
+    runTask: runner, targetMetric: "completion_rate", persist: false,
+  });
+  assert.equal(record.report.targetMetric, "completion_rate");
+  assert.equal(record.report.championCompletionPct, 0);
+  assert.equal(record.report.challengerCompletionPct, 100);
+  assert.ok(record.report.targetImprovementPct >= 5);
+  assert.equal(record.report.gates.find((gate) => gate.name === "target_metric_improved")?.passed, true);
+});
+
+test("a semantic_quality target still gates on quality when it does not improve", async () => {
+  const champion = await initChampion(naiveChampionConfig(), "init");
+  const challenger = await createChallenger(applyWorkflowPatch(champion.config, { conceptCount: 3 }), {
+    parentVersionId: champion.versionId, sourceProposalId: null, changeSummary: "concepts",
+  });
+  const flat: TaskRunner = async (input) => buildTrace(input.configVersionId, input.taskCase.task, { approved: true, concepts: 1, cost: 0.2, interventions: 0 });
+  const record = await runEvaluation({ proposalId: "p", championVersion: champion, challengerVersion: challenger, runTask: flat, targetMetric: "semantic_quality", persist: false });
+  assert.equal(record.report.targetMetric, "semantic_quality");
+  assert.equal(record.report.gates.find((gate) => gate.name === "target_metric_improved")?.passed, false);
 });
 
 test("cost tolerance violations block readiness", async () => {

@@ -41,6 +41,29 @@ export const PROMOTION_THRESHOLDS: PromotionThresholds = Object.freeze({
   maxCostIncreasePct: 25,
 });
 
+// When a proposal targets a non-quality metric, quality may not regress beyond
+// this (control-plane fixed, not proposable).
+const MAX_QUALITY_REGRESSION_PCT = 15;
+
+export type TargetMetric =
+  | "semantic_quality"
+  | "completion_rate"
+  | "latency"
+  | "cost"
+  | "human_intervention";
+
+// Map a proposal's free-text targetMetric onto a metric the evaluator measures,
+// so champion vs challenger is judged on what the proposal actually aimed to
+// change (e.g. a reliability fix is judged on completion, not on quality).
+export function normalizeTargetMetric(metric: string | undefined): TargetMetric {
+  const value = (metric ?? "").toLowerCase();
+  if (value.includes("completion") || value.includes("reliab")) return "completion_rate";
+  if (value.includes("latency") || value.includes("speed")) return "latency";
+  if (value.includes("cost")) return "cost";
+  if (value.includes("intervention")) return "human_intervention";
+  return "semantic_quality";
+}
+
 // ── Default champion configuration + fixed evaluation cases ───────────────────
 
 export const NAIVE_WORKFLOW_POLICY: WorkflowPolicy = {
@@ -141,6 +164,12 @@ function simulateCreativeRun(input: TaskRunInput): RunTrace {
   const policy = input.config.workflowPolicy;
   const textModel = input.config.routing.defaultModel;
   const videoModel = "wan-2-7-text-to-video";
+  // Fast latency mode means tighter, cheaper deliberation and lower latency —
+  // the lever the reliability reviewer pulls after repeated timeouts.
+  const fast = policy.latencyMode === "fast";
+  const conceptCost = fast ? 0.014 : 0.02;
+  const reviseCost = fast ? 0.014 : 0.02;
+  const latencyScale = fast ? 0.6 : 1;
   const modelCalls: ModelCallRecord[] = [];
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: TraceArtifact[] = [];
@@ -148,8 +177,8 @@ function simulateCreativeRun(input: TaskRunInput): RunTrace {
 
   const concepts = Math.max(1, policy.conceptCount);
   for (let index = 0; index < concepts; index += 1) {
-    modelCalls.push({ model: textModel, purpose: "concept", costUsd: 0.02, latencyMs: 1200 });
-    cost += 0.02;
+    modelCalls.push({ model: textModel, purpose: "concept", costUsd: conceptCost, latencyMs: 1200 });
+    cost += conceptCost;
   }
   const image: TraceArtifact = { id: `img-${input.configVersionId}-${input.taskCase.id}`, kind: "image", approved: false };
   artifacts.push(image);
@@ -158,11 +187,11 @@ function simulateCreativeRun(input: TaskRunInput): RunTrace {
 
   let revisions = 0;
   if (policy.reviseBelowQuality !== null) {
-    while (revisions < policy.maxRevisions && cost + 0.02 <= policy.budgetUsd) {
+    while (revisions < policy.maxRevisions && cost + reviseCost <= policy.budgetUsd) {
       const provisional = qualityFromFeatures({ concepts, critic: policy.useSeparateCritic, revisions, animatedUnapproved: false, toolFailures: 0 });
       if (provisional >= policy.reviseBelowQuality) break;
-      modelCalls.push({ model: textModel, purpose: "revise", costUsd: 0.02, latencyMs: 1000 });
-      cost += 0.02;
+      modelCalls.push({ model: textModel, purpose: "revise", costUsd: reviseCost, latencyMs: 1000 });
+      cost += reviseCost;
       revisions += 1;
     }
   }
@@ -191,7 +220,7 @@ function simulateCreativeRun(input: TaskRunInput): RunTrace {
   if (animatedUnapproved) humanInterventions += 2;
   if (!policy.useSeparateCritic) humanInterventions += 1;
 
-  const latencyMs = modelCalls.reduce((total, call) => total + call.latencyMs, 0) + toolCalls.length * 200;
+  const latencyMs = Math.round((modelCalls.reduce((total, call) => total + call.latencyMs, 0) + toolCalls.length * 200) * latencyScale);
 
   return {
     runId: crypto.randomUUID(),
@@ -277,6 +306,8 @@ export interface RunEvaluationInput {
   persist?: boolean;
   /** True when this is a live evaluation (real agent + judge), not the simulation. */
   live?: boolean;
+  /** The proposal's declared target metric; the report measures and gates on it. */
+  targetMetric?: string;
 }
 
 export async function runEvaluation(input: RunEvaluationInput): Promise<EvaluationRecord> {
@@ -315,7 +346,7 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
     const contaminationFree = cases
       .filter((testCase) => testCase.kind === "held_out")
       .every((testCase) => !(input.reviewerVisibleCaseIds ?? []).includes(testCase.id));
-    const report = buildReport(cases, comparisons, contaminationFree);
+    const report = buildReport(cases, comparisons, contaminationFree, normalizeTargetMetric(input.targetMetric));
     const record: EvaluationRecord = {
       evaluationId: crypto.randomUUID(),
       proposalId: input.proposalId,
@@ -350,13 +381,61 @@ function average(values: number[]): number {
   return values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
 }
 
-function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], contaminationFree: boolean): ComparisonReport {
+function pctChangeHigherBetter(champ: number, chall: number): number {
+  return champ > 0 ? round1(((chall - champ) / champ) * 100) : (chall > 0 ? 100 : 0);
+}
+
+function pctChangeLowerBetter(champ: number, chall: number): number {
+  return champ > 0 ? round1(((champ - chall) / champ) * 100) : (chall > 0 ? -100 : 0);
+}
+
+interface ReportAggregates {
+  championQuality: number;
+  challengerQuality: number;
+  championCompletionPct: number;
+  challengerCompletionPct: number;
+  championCost: number;
+  challengerCost: number;
+  championLatencyMs: number;
+  challengerLatencyMs: number;
+  championInterventions: number;
+  challengerInterventions: number;
+}
+
+// Improvement (positive = better) for the proposal's declared target metric,
+// with the correct direction per metric. This is what makes evaluation measure
+// what the proposal actually aimed to change, not always semantic quality.
+function targetMetricImprovementPct(metric: TargetMetric, agg: ReportAggregates): number {
+  switch (metric) {
+    case "completion_rate": return pctChangeHigherBetter(agg.championCompletionPct, agg.challengerCompletionPct);
+    case "latency": return pctChangeLowerBetter(agg.championLatencyMs, agg.challengerLatencyMs);
+    case "cost": return pctChangeLowerBetter(agg.championCost, agg.challengerCost);
+    case "human_intervention": return pctChangeLowerBetter(agg.championInterventions, agg.challengerInterventions);
+    case "semantic_quality":
+    default: return pctChangeHigherBetter(agg.championQuality, agg.challengerQuality);
+  }
+}
+
+function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], contaminationFree: boolean, targetMetric: TargetMetric): ComparisonReport {
   const championQuality = round1(average(comparisons.map((comparison) => comparison.champion.semanticScore)));
   const challengerQuality = round1(average(comparisons.map((comparison) => comparison.challenger.semanticScore)));
+  const championCompletionPct = round1(average(comparisons.map((comparison) => (comparison.champion.completed ? 100 : 0))));
+  const challengerCompletionPct = round1(average(comparisons.map((comparison) => (comparison.challenger.completed ? 100 : 0))));
   const championCost = round2(comparisons.reduce((total, comparison) => total + comparison.champion.costUsd, 0));
   const challengerCost = round2(comparisons.reduce((total, comparison) => total + comparison.challenger.costUsd, 0));
-  const qualityDeltaPct = championQuality > 0 ? round1(((challengerQuality - championQuality) / championQuality) * 100) : (challengerQuality > 0 ? 100 : 0);
+  const championLatencyMs = Math.round(average(comparisons.map((comparison) => comparison.champion.latencyMs)));
+  const challengerLatencyMs = Math.round(average(comparisons.map((comparison) => comparison.challenger.latencyMs)));
+  const championInterventions = comparisons.reduce((total, comparison) => total + comparison.champion.humanInterventions, 0);
+  const challengerInterventions = comparisons.reduce((total, comparison) => total + comparison.challenger.humanInterventions, 0);
+
+  const qualityDeltaPct = pctChangeHigherBetter(championQuality, challengerQuality);
   const costDeltaPct = championCost > 0 ? round1(((challengerCost - championCost) / championCost) * 100) : (challengerCost > 0 ? 100 : 0);
+  const aggregates: ReportAggregates = {
+    championQuality, challengerQuality, championCompletionPct, challengerCompletionPct,
+    championCost, challengerCost, championLatencyMs, challengerLatencyMs,
+    championInterventions, challengerInterventions,
+  };
+  const targetImprovementPct = targetMetricImprovementPct(targetMetric, aggregates);
 
   const criticalRegressions: string[] = [];
   const replayRegressions: string[] = [];
@@ -374,23 +453,32 @@ function buildReport(cases: EvaluationCase[], comparisons: CaseComparison[], con
   const gates: GateResult[] = [
     { name: "no_critical_regression", passed: criticalRegressions.length === 0, detail: criticalRegressions.join(", ") || "none" },
     { name: "no_replay_regression", passed: replayRegressions.length === 0, detail: replayRegressions.join(", ") || "none" },
-    { name: "target_metric_improved", passed: qualityDeltaPct >= PROMOTION_THRESHOLDS.minQualityImprovementPct, detail: `quality ${qualityDeltaPct}% vs required ${PROMOTION_THRESHOLDS.minQualityImprovementPct}%` },
+    { name: "target_metric_improved", passed: targetImprovementPct >= PROMOTION_THRESHOLDS.minQualityImprovementPct, detail: `${targetMetric} ${targetImprovementPct}% vs required ${PROMOTION_THRESHOLDS.minQualityImprovementPct}%` },
     { name: "cost_within_tolerance", passed: costDeltaPct <= PROMOTION_THRESHOLDS.maxCostIncreasePct, detail: `cost ${costDeltaPct}% vs tolerance ${PROMOTION_THRESHOLDS.maxCostIncreasePct}%` },
     { name: "no_contamination", passed: contaminationFree, detail: contaminationFree ? "held-out cases were hidden from the generator" : "held-out contamination detected" },
   ];
+  // When the target is not quality, guard the tradeoff: quality must not regress
+  // beyond tolerance while chasing the other metric.
+  if (targetMetric !== "semantic_quality") {
+    const qualityDrop = championQuality > 0 ? round1(((championQuality - challengerQuality) / championQuality) * 100) : 0;
+    gates.push({ name: "no_quality_regression", passed: qualityDrop <= MAX_QUALITY_REGRESSION_PCT, detail: `quality drop ${qualityDrop}% vs tolerance ${MAX_QUALITY_REGRESSION_PCT}%` });
+  }
 
   return {
-    targetMetric: "semantic_quality",
+    targetMetric,
     championQuality,
     challengerQuality,
     qualityDeltaPct,
+    championCompletionPct,
+    challengerCompletionPct,
     championCost,
     challengerCost,
     costDeltaPct,
-    championLatencyMs: Math.round(average(comparisons.map((comparison) => comparison.champion.latencyMs))),
-    challengerLatencyMs: Math.round(average(comparisons.map((comparison) => comparison.challenger.latencyMs))),
-    championInterventions: comparisons.reduce((total, comparison) => total + comparison.champion.humanInterventions, 0),
-    challengerInterventions: comparisons.reduce((total, comparison) => total + comparison.challenger.humanInterventions, 0),
+    championLatencyMs,
+    challengerLatencyMs,
+    championInterventions,
+    challengerInterventions,
+    targetImprovementPct,
     replayRegressions,
     criticalRegressions,
     gates,
@@ -412,6 +500,7 @@ export async function reproduceEvaluation(record: EvaluationRecord): Promise<Eva
     challengerVersion,
     cases,
     seed: record.seed,
+    targetMetric: record.report.targetMetric,
     persist: false,
   });
 }

@@ -19,7 +19,8 @@ import { getChampionConfig } from "./lab/apply";
 import { autopilotEnabled, getLabSnapshot } from "./lab/service";
 import { policyDirectives } from "./lab/policy";
 import { getMemorySnapshot } from "./memory";
-import { listApprovals, listGrants } from "./approval-store";
+import { guardedToolList, listApprovals, listGrants } from "./approval-store";
+import { gondolaConstitution } from "./constitution";
 import { loadModelRegistry } from "./model-registry";
 import type {
   CapabilityEntry,
@@ -275,7 +276,18 @@ export async function buildRuntimeSnapshot(input: RuntimeSnapshotInput): Promise
     approvals: {
       pending: approvalsPending.map((record) => ({ id: record.id, tool: record.tool, summary: record.summary, createdAt: record.createdAt })),
       sessionGrants: grants.map((grant) => ({ tool: grant.tool, grantedAt: grant.grantedAt })),
+      guardedTools: guardedToolList(),
     },
+    architecture: (() => {
+      const constitution = gondolaConstitution();
+      return {
+        version: constitution.version,
+        purpose: constitution.purpose,
+        principles: constitution.principles.map((principle) => ({ title: principle.title, text: principle.text })),
+        roles: constitution.roles.map((role) => ({ role: role.role, responsibility: role.responsibility, boundary: role.boundary })),
+        subsystems: constitution.subsystems.map((subsystem) => ({ name: subsystem.name, purpose: subsystem.purpose })),
+      };
+    })(),
     environment: {
       workspacePath: process.cwd(),
       os: `${os.type()} ${os.release()}`,
