@@ -716,6 +716,10 @@ function Workspace() {
   // Turns still generating, keyed by conversation id. A turn keeps running when
   // you switch away, so its chat shows a spinner in the sidebar until it finishes.
   const runningTurnsRef = useRef(new Map<string, AbortController>());
+  // The in-flight streaming assistant message per conversation, mirrored so a
+  // chat you switch away from can re-attach its live reply (and keep streaming)
+  // when you return, instead of freezing until the turn finishes.
+  const liveTurnsRef = useRef(new Map<string, ChatMessage>());
   const [runningConversations, setRunningConversations] = useState<string[]>([]);
   const sessionIdRef = useRef("");
   const markConversationRunning = useCallback((conversationId: string, controller: AbortController) => {
@@ -849,8 +853,13 @@ function Workspace() {
     setSessionId(payload.conversation.id);
     sessionIdRef.current = payload.conversation.id;
     setActiveAgentId(payload.conversation.agentId);
+    // If this conversation has a turn still streaming in the background, re-attach
+    // its live message so it keeps rendering (the persisted transcript does not
+    // include the in-flight reply yet).
+    const liveMessage = liveTurnsRef.current.get(payload.conversation.id);
     setMessages([
       ...conversationMessages(payload.messages),
+      ...(liveMessage ? [liveMessage] : []),
       ...messageQueueRef.current
         .filter((item) => item.conversationId === payload.conversation.id)
         .map(queuedChatMessage),
@@ -2183,6 +2192,28 @@ function Workspace() {
     let lastToolResult = "";
     let toolFailed = false;
     let firstDeltaReceived = false;
+    // Mirror the in-flight assistant message per conversation so switching away
+    // and back re-attaches the live reply (see applyConversation) instead of
+    // freezing it. Cleared in the finally once the turn ends.
+    const trackLive = !options.hidden && !options.silent;
+    const liveCreatedAt = Date.now();
+    let liveThinking = "";
+    let liveThinkingStreaming = false;
+    let liveStatusText: string | undefined = acknowledgement ?? "Thinking about that…";
+    const syncLive = () => {
+      if (!trackLive) return;
+      liveTurnsRef.current.set(turnConversationId, {
+        id: assistantId,
+        role: "assistant",
+        text: finalText,
+        statusText: finalText ? undefined : liveStatusText,
+        streaming: true,
+        thinking: liveThinking || undefined,
+        thinkingStreaming: liveThinkingStreaming,
+        createdAt: liveCreatedAt,
+      });
+    };
+    syncLive();
     // At most one spoken "here's what I'm doing" line per turn (either the
     // pre-emptive acknowledgement or a live tool narration), so voice mode keeps
     // the user informed without stacking filler phrases.
@@ -2264,6 +2295,7 @@ function Workspace() {
             ui(() => setMessages((current) => current.map((item) => item.id === assistantId ? { ...item, statusText: undefined } : item)));
             finalText += event.delta;
             pendingSpeech += event.delta;
+            syncLive();
             if (isActiveTurn() && options.voiceTurn && voiceOn && !queuedEarlySpeech) {
               const opening = takeEarlySpeechSegment(pendingSpeech);
               if (opening) {
@@ -2287,14 +2319,18 @@ function Workspace() {
               return next;
             })));
           } else if (event.type === "thinking_start") {
+            liveThinkingStreaming = true;
             ui(() => {
               setPhase("thinking");
               setMessages((current) => current.map((item) => item.id === assistantId
                 ? { ...item, thinkingStreaming: true, thinkingStartedAt: item.thinkingStartedAt ?? Date.now() }
                 : item));
             });
+            syncLive();
           } else if (event.type === "thinking_delta" && event.delta) {
             const delta = event.delta;
+            liveThinking += delta;
+            liveThinkingStreaming = true;
             ui(() => {
               setPhase("thinking");
               setMessages((current) => current.map((item) => item.id === assistantId
@@ -2307,7 +2343,9 @@ function Workspace() {
                 }
                 : item));
             });
+            syncLive();
           } else if (event.type === "thinking_end") {
+            liveThinkingStreaming = false;
             ui(() => setMessages((current) => current.map((item) => item.id === assistantId
               ? {
                 ...item,
@@ -2315,8 +2353,10 @@ function Workspace() {
                 thinkingMs: item.thinkingMs ?? (item.thinkingStartedAt ? Date.now() - item.thinkingStartedAt : undefined),
               }
               : item)));
+            syncLive();
           } else if (event.type === "tool_start") {
             const label = toolStatus(event.name, agentName);
+            liveStatusText = event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…`;
             ui(() => { setPhase("tool"); setToolLabel(label); });
             // Narrate the action aloud so a voice turn doesn't go silent while a
             // tool (web search, camera, media, etc.) runs. Only once per turn and
@@ -2332,6 +2372,7 @@ function Workspace() {
             ui(() => setMessages((current) => current.map((item) => item.id === assistantId && !item.text
               ? { ...item, statusText: event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…` }
               : item)));
+            syncLive();
           } else if (event.type === "tool_end") {
             ui(() => {
               const mediaId = handleToolResult(event);
@@ -2434,6 +2475,7 @@ function Workspace() {
       if (acknowledgementTimer) window.clearTimeout(acknowledgementTimer);
       if (streamIdleTimer) window.clearTimeout(streamIdleTimer);
       clearConversationRunning(turnConversationId);
+      liveTurnsRef.current.delete(turnConversationId);
       if (requestAbortRef.current === controller) requestAbortRef.current = undefined;
       if (bargeInCapturePendingRef.current) setVoiceLoopRevision((value) => value + 1);
       if (options.hidden) cameraGreetingInFlightRef.current = false;
