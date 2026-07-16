@@ -115,6 +115,25 @@ test("generateProposal does not create the same proposal twice", async () => {
   assert.equal(second, null, "the same change must not be proposed twice");
 });
 
+test("generateProposal falls through to reliability when the creative proposal is a duplicate", async () => {
+  await seedDemo();
+  const creative = await generateProposal();
+  assert.ok(creative, "the creative proposal is generated first");
+  // Regenerating alone would yield the same (now duplicate) creative proposal.
+  // Add live timeout failures so the reliability reviewer has something to say.
+  const champion = await getChampion();
+  const failing = (): RunTrace => ({
+    ...buildTrace(champion?.versionId ?? "v", "a live user goal", { approved: true, concepts: 1, cost: 0, interventions: 0 }),
+    completed: false,
+    failureCategory: "timeout",
+  });
+  await saveTrace(failing());
+  await saveTrace(failing());
+  const next = await generateProposal();
+  assert.ok(next, "the reliability proposal is generated even though the creative one is a duplicate");
+  assert.equal(next?.configPatch.latencyMode, "fast");
+});
+
 test("reviewReliability proposes fast latency mode after repeated timeouts", () => {
   const champion = naiveChampionConfig();
   const failing = (): RunTrace => ({

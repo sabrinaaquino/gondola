@@ -284,6 +284,12 @@ export interface EvaluationRecord {
   cases: CaseComparison[];
   report: ComparisonReport;
   contaminationFree: boolean;
+  /**
+   * True when the evaluation ran the real agent (live inference), false/absent
+   * for the offline simulation. The autopilot only auto-promotes on live
+   * evidence, so a simulated pass can never promote itself unattended.
+   */
+  live?: boolean;
   createdAt: string;
 }
 

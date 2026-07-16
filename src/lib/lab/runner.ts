@@ -2,6 +2,7 @@ import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { makeModel, createVeniceStreamFn } from "../venice-model";
 import { veniceJson } from "../venice";
 import { resolveRoutedModel } from "./apply";
+import { policyPromptBlock } from "./policy";
 import { JUDGE_CONFIG, type TaskRunInput, type TaskRunner } from "./evaluation";
 import { RUNTIME_VERSION, type LabConfig, type ModelCallRecord, type RunTrace, type ToolCallRecord, type TraceArtifact } from "./types";
 
@@ -43,7 +44,15 @@ function round(value: number): number {
 function roleSystemPrompt(config: LabConfig): string {
   const creator = config.roles.find((role) => role.name === "creator") ?? config.roles[0];
   const base = creator?.instructions ?? "Complete the requested task end to end.";
-  return `${base}\n\nWork autonomously with the tools you have. When finished, reply with a single concise, self-contained result.`;
+  // Inject the SAME policy -> behavior block the live agent uses, so a challenger
+  // config actually behaves differently here (harness benefit in evaluation), not
+  // just in production. Without this, champion vs challenger would be identical
+  // for every workflow-policy field and the Lab would grade descriptions, not
+  // genuinely different harnesses.
+  const policy = policyPromptBlock(config.workflowPolicy);
+  return [base, policy, "Work autonomously with the tools you have. When finished, reply with a single concise, self-contained result."]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /**

@@ -573,7 +573,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     executionMode: "sequential",
     async execute(_toolCallId, params) {
       const input = params as { reason: string };
-      const proposal = await generateProposal().catch(() => null);
+      const proposal = await generateProposal(input.reason).catch(() => null);
       if (!proposal) {
         return {
           content: [{ type: "text", text: "I flagged this to Gondola Lab, but it did not find a new, bounded change to propose from recent traces right now." }],

@@ -24,7 +24,7 @@ import {
   simulatedJudge,
   simulatedTaskRunner,
 } from "./evaluation";
-import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, reviewReliability, reviewTraces } from "./reviewer";
+import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, reviewReliability, reviewTraces, type ProposalDraft } from "./reviewer";
 import { createLiveJudge, createLiveTaskRunner, makeLiveRunAgent } from "./runner";
 import type { ConfigVersion, EvaluationRecord, ImprovementProposal, ProposalCategory, RunTrace } from "./types";
 
@@ -70,26 +70,39 @@ function sameConfigPatch(a: ImprovementProposal["configPatch"], b: ImprovementPr
   return normalize(a) === normalize(b);
 }
 
-/** Reviewer proposes one bounded workflow-policy change and creates a challenger. */
-export async function generateProposal(): Promise<ImprovementProposal | null> {
+/**
+ * Reviewer proposes one bounded change and creates a challenger. Each reviewer is
+ * tried in order, and a candidate that duplicates an existing proposal is skipped
+ * so the next reviewer still gets a chance. This is important: without it, a
+ * recurring creative proposal (already in the store) would dedup to null and the
+ * reliability reviewer would never propose the timeout fix. `hint` carries an
+ * optional agent-stated reason (from propose_harness_change) onto the proposal.
+ */
+export async function generateProposal(hint?: string): Promise<ImprovementProposal | null> {
   const champion = await ensureChampion();
   const allTraces = await listTraces();
   const visibleTasks = new Set(reviewerVisibleCases().map((testCase) => testCase.task));
   const visibleTraces = allTraces.filter((trace) => visibleTasks.has(trace.goal));
-  // Creative-quality review over the reviewer-visible cases, then a reliability
-  // review over live failure traces the supervisor tagged. First non-null wins.
-  const draft = reviewTraces(visibleTraces, champion.config) ?? reviewReliability(allTraces, champion.config);
+  const existing = await listProposals();
+  const isDuplicate = (candidate: ProposalDraft) =>
+    existing.some((proposal) => proposal.category === candidate.category && sameConfigPatch(proposal.configPatch, candidate.configPatch));
+
+  // Creative-quality review over reviewer-visible cases, then reliability review
+  // over the live failure traces the supervisor tagged. Skip empty or duplicate
+  // candidates and fall through to the next reviewer.
+  const reviewers: Array<() => ProposalDraft | null> = [
+    () => reviewTraces(visibleTraces, champion.config),
+    () => reviewReliability(allTraces, champion.config),
+  ];
+  let draft: ProposalDraft | null = null;
+  for (const review of reviewers) {
+    const candidate = review();
+    if (candidate && !isDuplicate(candidate)) { draft = candidate; break; }
+  }
   if (!draft) return null;
   assertAllowedProposalCategory(draft.category);
 
-  // Don't propose the same change twice. If an existing proposal already makes
-  // this exact change (same category + config patch), there is nothing new to
-  // suggest, so returning null surfaces "no new suggestions" in the Lab.
-  const existing = await listProposals();
-  if (existing.some((candidate) => candidate.category === draft.category && sameConfigPatch(candidate.configPatch, draft.configPatch))) {
-    return null;
-  }
-
+  const trimmedHint = hint?.trim();
   const proposalId = crypto.randomUUID();
   const challengerConfig = applyWorkflowPatch(champion.config, draft.configPatch);
   const challenger = await createChallenger(challengerConfig, {
@@ -100,6 +113,7 @@ export async function generateProposal(): Promise<ImprovementProposal | null> {
 
   const proposal: ImprovementProposal = {
     ...draft,
+    ...(trimmedHint ? { observedProblem: `${draft.observedProblem} (Flagged by the agent: ${trimmedHint})` } : {}),
     proposalId,
     challengerVersionId: challenger.versionId,
     status: "draft",
@@ -149,6 +163,10 @@ export async function maybeAutoPromote(proposalId: string): Promise<ConfigVersio
   if (!proposal || proposal.status !== "ready_for_review") return null;
   if (proposal.riskLevel !== "low") return null;
   if (!AUTO_PROMOTABLE_CATEGORIES.includes(proposal.category)) return null;
+  // Only auto-promote on real evidence. A pass from the offline simulation is
+  // never enough to promote a live-behavior change unattended.
+  const evaluation = proposal.evaluationId ? await getEvaluation(proposal.evaluationId) : undefined;
+  if (!evaluation?.live) return null;
   return promoteProposal(proposalId, "gondola-auto").catch(() => null);
 }
 
@@ -172,6 +190,7 @@ export async function evaluateProposal(proposalId: string, opts?: { live?: boole
     cases: CASE_REGISTRY,
     seed: 1,
     reviewerVisibleCaseIds: reviewerVisibleCases().map((testCase) => testCase.id),
+    live: opts?.live === true,
     ...(opts?.live ? { runTask: createLiveTaskRunner(makeLiveRunAgent()), judge: createLiveJudge() } : {}),
   });
   await saveProposal({

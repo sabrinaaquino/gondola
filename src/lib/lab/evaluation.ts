@@ -275,6 +275,8 @@ export interface RunEvaluationInput {
   judge?: (trace: RunTrace) => number | Promise<number>;
   reviewerVisibleCaseIds?: string[];
   persist?: boolean;
+  /** True when this is a live evaluation (real agent + judge), not the simulation. */
+  live?: boolean;
 }
 
 export async function runEvaluation(input: RunEvaluationInput): Promise<EvaluationRecord> {
@@ -325,6 +327,7 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
       cases: comparisons,
       report,
       contaminationFree,
+      live: input.live === true,
       createdAt: new Date().toISOString(),
     };
     if (persist) await saveEvaluation(record);
