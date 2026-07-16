@@ -15,6 +15,7 @@ import {
   SMART_FAST_CHAT_MODEL,
 } from "./app-types";
 import { currentDateTimeContext, needsLiveWebResearch } from "./conversation";
+import { createIdentityManifest, identitySelfModelPrompt } from "./identity";
 import {
   appendSessionRecord,
   captureExplicitMemory,
@@ -51,6 +52,7 @@ import { loadTranscript, saveTranscript } from "./transcript";
 import { enqueueRun } from "./run-queue";
 import { MAX_SUBAGENT_DEPTH, runSubAgent } from "./subagent";
 import { recordExperience } from "./skill-distiller";
+import { recordLiveTrace } from "./lab/ingest";
 import { createUserAgentMessage, retainUnansweredUserMessage } from "./agent-context";
 
 type Emit = (event: Record<string, unknown>) => void;
@@ -76,6 +78,8 @@ interface RuntimeContext {
   subAgentDepth: number;
   /** Which memory this turn reads and writes: personal, or an agent's private store. */
   memoryScope: MemoryScope;
+  /** Per-turn collector for the Lab trace bridge: tool outcomes + start time. */
+  turnTrace?: { startedAt: number; toolCalls: { tool: string; ok: boolean; error?: string }[] };
 }
 
 /**
@@ -135,7 +139,7 @@ When a webcam snapshot is attached to a turn, you can see the user through that 
 - On a first-look greeting, mention at most one detail only when it is genuinely prominent: a gesture, something deliberately held up, a pet, an instrument, a microphone or creator setup, striking artwork, or another unmistakably distinctive object. If nothing like that stands out, simply say hello, confirm that you can see the person, and explain that you will notice gestures or things they show you.
 - Be selective. Generic darkness or lighting, ordinary walls, screens, furniture, cables, tiny lights, and minor clutter are not conversation-worthy. Do not narrate every detail or repeatedly mention an unchanged background, and never claim to know feelings or private traits from appearance.
 
-Your saved profile controls your identity. "Entity" is a neutral UI placeholder, not an assumed proper name. When it is still your display label, refer to yourself naturally as "I" and do not call yourself "Entity" in ordinary replies or introductions. Invite the user to give you a name at a natural early moment, without derailing their task or repeatedly asking. When the user explicitly gives you a name, renames you, or asks you to change your personality, use rewrite_self. You may rewrite only your saved name, description, and conversational self-instructions. Never use it to alter code, credentials, safety boundaries, tools, permissions, or the user's data. Treat the user's explicit request as the authority for every change and briefly acknowledge the new identity after the tool succeeds.
+Your saved profile and the grounded self-model above define who you are. Entity is your current default name until the owner gives you one; treat it as your name and never claim you have no name. Invite the user to give you a name at a natural early moment, without derailing their task or repeatedly asking. When the user explicitly gives you a name, renames you, or asks you to change your personality, use rewrite_self. You may rewrite only your saved name, description, and conversational self-instructions. Never use it to alter code, credentials, safety boundaries, tools, permissions, or the user's data. Treat the user's explicit request as the authority for every change and briefly acknowledge the new identity after the tool succeeds.
 
 You have an animated alien body and Venice-powered tools:
 - When the user asks you to smile, wink, nod, look around, react, or copy an expression, call animate_avatar before replying.
@@ -165,10 +169,10 @@ function buildSystemPrompt(
   mcpServers: McpServerConfig[],
   memorySnapshot: string,
 ): string {
+  const identityManifest = createIdentityManifest({ entity: { name: profile.name } });
   return [
-    profile.name === "Entity"
-      ? `Your current display label is Entity because the user has not named you yet. ${profile.description}.`
-      : `Your user-chosen name is ${profile.name}. ${profile.description}.`,
+    identitySelfModelPrompt(identityManifest),
+    profile.description ? `${profile.description.replace(/\.\s*$/, "")}.` : "",
     profile.instructions,
     `${currentDateTimeContext()} This clock is silent background context for resolving relative references such as "today," "tonight," or "next week." Do not state, greet with, or otherwise volunteer the current day, date, or time unless the user actually asks for it or it is directly relevant to their request.`,
     SYSTEM_PROMPT,
@@ -989,9 +993,16 @@ function createSession(input: {
     } else if (event.type === "tool_execution_update") {
       runtime.emit({ type: "tool_update", name: event.toolName, partial: event.partialResult });
     } else if (event.type === "tool_execution_end") {
-      if (event.toolName === "search_web" && !needsLiveWebResearch(runtime.currentMessage ?? "")) return;
       const result = event.result as { content?: Array<{ type?: string; text?: string }>; details?: unknown } | undefined;
       const resultText = result?.content?.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n").trim();
+      // Record every tool outcome for the Lab trace bridge, including ones the UI
+      // suppresses below, so the outer loop sees the real execution history.
+      runtime.turnTrace?.toolCalls.push({
+        tool: event.toolName,
+        ok: !event.isError,
+        ...(event.isError ? { error: (resultText || "tool error").slice(0, 240) } : {}),
+      });
+      if (event.toolName === "search_web" && !needsLiveWebResearch(runtime.currentMessage ?? "")) return;
       runtime.emit({
         type: "tool_end",
         name: event.toolName,
@@ -1083,6 +1094,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   session.runtime.emit = input.emit;
   session.runtime.currentMessage = input.message;
   session.runtime.webSearchCompleted = false;
+  session.runtime.turnTrace = { startedAt: Date.now(), toolCalls: [] };
   session.agent.state.systemPrompt = buildSystemPrompt(
     resources.agent,
     resources.skills,
@@ -1237,6 +1249,22 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
               ? message.content.flatMap((part) => (part.type === "toolCall" ? [part.name] : []))
               : []);
           void recordExperience({ agentId: resources.agent.id, conversationId: input.sessionId, message: input.message, tools: turnTools }).catch(() => undefined);
+          // Bridge this completed turn into the Lab as an immutable draft trace.
+          // Observation only: the Lab reads these to propose improvements, but the
+          // acting runtime never grades or promotes itself from here.
+          const modelCosts = addedMessages.flatMap((message) =>
+            message.role === "assistant" && message.stopReason !== "error"
+              ? [{ model: message.model ?? model, costUsd: message.usage?.cost?.total ?? 0 }]
+              : []);
+          void recordLiveTrace({
+            goal: input.message,
+            modelsSelected: [model],
+            modelCosts,
+            toolCalls: session.runtime.turnTrace?.toolCalls ?? [],
+            latencyMs: Date.now() - (session.runtime.turnTrace?.startedAt ?? Date.now()),
+            completed: true,
+            finalOutput: assistantText ?? "",
+          }).catch(() => undefined);
         }
         return;
       }
@@ -1272,6 +1300,17 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
       unansweredUserMessage,
     );
     await saveTranscript(input.sessionId, session.agent.state.messages).catch(() => undefined);
+    // Record the failed turn too: repeated failures are exactly what the Lab's
+    // outer loop needs to see to propose a fix.
+    void recordLiveTrace({
+      goal: input.message,
+      modelsSelected: candidates,
+      modelCosts: [],
+      toolCalls: session.runtime.turnTrace?.toolCalls ?? [],
+      latencyMs: Date.now() - (session.runtime.turnTrace?.startedAt ?? Date.now()),
+      completed: false,
+      finalOutput: lastError,
+    }).catch(() => undefined);
   }
   throw new Error(`Venice is temporarily unavailable after trying compatible fallbacks. ${lastError}`);
 }
