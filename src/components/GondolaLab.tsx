@@ -116,15 +116,10 @@ const CSS = `
 .gl-step.current .gl-step-label { color: var(--ink); }
 .gl-step.fail .gl-step-dot { background: var(--coral); box-shadow: 0 0 9px rgba(255,142,122,.5); }
 .gl-step.fail .gl-step-label { color: var(--coral); }
-.gl-hint { margin: 1px 8px 4px; color: #5f6672; font-size: 10.5px; line-height: 1.35; white-space: normal; }
-.gl-intro { max-width: 580px; }
+.gl-intro { max-width: 520px; }
 .gl-intro h3 { margin: 0 0 8px; color: var(--ink); font-size: 15px; font-weight: 640; }
-.gl-intro > p { margin: 0 0 12px; color: #c3c8d0; font-size: 13px; line-height: 1.6; }
-.gl-steps-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
-.gl-steps-list li { display: flex; gap: 10px; color: #c3c8d0; font-size: 12.5px; line-height: 1.5; }
-.gl-steps-list b { color: var(--ink); font-weight: 640; }
-.gl-steps-list .n { flex: 0 0 auto; width: 19px; height: 19px; border-radius: 6px; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: var(--mint); background: rgba(201,204,210,.1); }
-.gl-note { margin-top: 14px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.015); color: var(--muted); font-size: 12px; line-height: 1.55; }
+.gl-intro > p { margin: 0 0 14px; color: #c3c8d0; font-size: 13px; line-height: 1.6; }
+.gl-note { padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.015); color: var(--muted); font-size: 12px; line-height: 1.55; }
 .gl-note b { color: var(--ink); }
 @media (max-width: 720px) {
   .gl-modal { width: calc(100vw - 24px); height: min(90vh, calc(100vh - 28px)); }
@@ -267,7 +262,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         <header className="gl-head">
           <div>
             <h2>Gondola Lab</h2>
-            <p>An external control plane that observes traces and proposes config changes. Nothing promotes, and no ability goes live, without your approval.</p>
+            <p>Proposes safe changes to the agent, and promotes them only after you approve.</p>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Close Gondola Lab"><CloseIcon size={20} /></button>
         </header>
@@ -298,7 +293,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         <div className="gl-body">
           <div className="gl-rail">
             <h3>Proposals</h3>
-            <p className="gl-hint">Suggested changes to the agent, waiting to be tested or approved.</p>
             {snapshot?.proposals.length
               ? snapshot.proposals.map((item) => (
                 <button key={item.proposalId} className={`gl-prop${selected === item.proposalId ? " is-active" : ""}`} onClick={() => setSelected(item.proposalId)}>
@@ -309,7 +303,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
               : <p className="muted" style={{ margin: "4px 8px" }}>No proposals yet. Seed a run, then generate one.</p>}
 
             <h3>Pending abilities</h3>
-            <p className="gl-hint">Tools the agent wrote for itself. They stay off until you approve them.</p>
             {pendingAbilities.length
               ? pendingAbilities.map((ability) => (
                 <div key={ability.id} className="gl-card">
@@ -324,7 +317,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
               : <p className="muted" style={{ margin: "4px 8px" }}>No abilities awaiting approval.</p>}
 
             <h3>Recent traces</h3>
-            <p className="gl-hint">What actually happened on recent runs, the evidence the Lab learns from.</p>
             {snapshot?.traces.slice(0, 6).map((trace) => (
               <div key={trace.runId} className="gl-card">
                 <strong style={{ fontWeight: 500, fontSize: "11px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{trace.goal.slice(0, 60)}</strong>
@@ -336,19 +328,12 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
           <div className="gl-detail">
             {!proposal ? (
               snapshot?.proposals.length ? (
-                <div className="gl-empty">Select a proposal on the left to see its evidence, the exact change it makes, and how it scored against the current setup.</div>
+                <div className="gl-empty">Select a proposal to see its evaluation.</div>
               ) : (
                 <div className="gl-intro">
-                  <h3>What Gondola Lab does</h3>
-                  <p>This is the agent&rsquo;s control plane, separate from the agent that does the work. It watches how the agent actually performs, drafts small safe changes to improve it, tests each one against the current setup, and asks you before anything goes live.</p>
-                  <ol className="gl-steps-list">
-                    <li><span className="n">1</span><span><b>Reads real traces.</b> Every run the agent does is recorded as evidence.</span></li>
-                    <li><span className="n">2</span><span><b>Proposes one bounded change.</b> A single safe tweak tied to a recurring problem, never a free-for-all rewrite.</span></li>
-                    <li><span className="n">3</span><span><b>Tests champion vs challenger.</b> The current live config (&ldquo;champion&rdquo;) runs head-to-head against the proposed one (&ldquo;challenger&rdquo;) on the same tasks.</span></li>
-                    <li><span className="n">4</span><span><b>Checks safety gates.</b> A change is only offered if it improves quality, adds no regressions, and stays within budget.</span></li>
-                    <li><span className="n">5</span><span><b>You approve.</b> Nothing is promoted automatically. Every change is versioned and can be rolled back.</span></li>
-                  </ol>
-                  <div className="gl-note"><b>New here?</b> Click <b>Seed demo run</b> to create example data, then <b>Generate proposal</b> and open it to run an evaluation and watch the full loop.</div>
+                  <h3>Improve the agent, safely</h3>
+                  <p>The steps above are the loop: Gondola studies real runs, proposes one small change, tests it against the current setup, and promotes it only after you approve.</p>
+                  <div className="gl-note">Start with <b>Seed demo run</b>, then <b>Generate proposal</b>.</div>
                 </div>
               )
             ) : (
@@ -360,7 +345,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 <p className="muted">Evidence: {proposal.traceEvidence.length} trace(s) · target {proposal.targetMetric} · risk {proposal.riskLevel}</p>
 
                 <h4>Configuration diff</h4>
-                <p className="gl-hint" style={{ margin: "0 0 6px" }}>The exact settings this change would alter.</p>
                 {detail?.diff.length ? (
                   <table className="gl-table">
                     <thead><tr><th>Field</th><th>Champion</th><th>Challenger</th></tr></thead>
@@ -382,7 +366,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 {report ? (
                   <>
                     <h4>Champion vs challenger</h4>
-                    <p className="gl-hint" style={{ margin: "0 0 6px" }}>Champion is the current live config; challenger is the proposed one, run on the same tasks. Higher quality, lower cost, and fewer interventions are better.</p>
                     <table className="gl-table">
                       <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Δ</th></tr></thead>
                       <tbody>
@@ -394,7 +377,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                     </table>
 
                     <h4>Gates</h4>
-                    <p className="gl-hint" style={{ margin: "0 0 6px" }}>Automatic safety checks a change must pass before you can promote it.</p>
                     {report.gates.map((gate) => (
                       <div key={gate.name} className={`gl-gate ${gate.passed ? "pass" : "fail"}`}><i />{gate.name.replace(/_/g, " ")} <small>{gate.detail}</small></div>
                     ))}
