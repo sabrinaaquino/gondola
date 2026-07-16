@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routeModel, routeModelLive, toModelCapability, type ModelCapability } from "./model-registry";
+import { resolveChatModelRequest, routeModel, routeModelLive, toModelCapability, usableChatModels, type ModelCapability } from "./model-registry";
 
 const textFast: ModelCapability = {
   id: "fast-text", provider: "venice", type: "text",
@@ -61,6 +61,33 @@ test("routeModelLive uses the cached registry and returns an explainable pick", 
   assert.ok(result, "a routing result should be returned from the cached registry");
   assert.equal(result.model, "fast-text");
   assert.ok(result.explanation.includes("fast-text"));
+});
+
+test("usableChatModels keeps only tool-capable text models", () => {
+  assert.deepEqual(usableChatModels(registry).map((model) => model.id).sort(), ["fast-text", "smart-text"]);
+});
+
+test("resolveChatModelRequest reports a foreign provider and offers real alternatives", () => {
+  const result = resolveChatModelRequest("change to claude 4.8", registry);
+  assert.equal(result.model, undefined);
+  assert.equal(result.foreign, "claude");
+  assert.ok(result.alternatives.length > 0);
+  assert.ok(result.alternatives.every((model) => model.type === "text"));
+});
+
+test("resolveChatModelRequest matches a Venice id by normalized substring", () => {
+  const glm: ModelCapability = {
+    id: "zai-org-glm-5-2", provider: "venice", type: "text",
+    modalities: { input: ["text"], output: ["text"] },
+    supportsTools: true, supportsReasoning: false, supportsStructuredOutput: true,
+    contextTokens: 64_000, strengths: [], typicalTasks: [], private: true,
+  };
+  assert.equal(resolveChatModelRequest("glm 5.2", [glm, ...registry]).model?.id, "zai-org-glm-5-2");
+});
+
+test("resolveChatModelRequest routes a descriptor to a concrete model", () => {
+  assert.equal(resolveChatModelRequest("switch to the fastest model", registry).model?.id, "fast-text");
+  assert.equal(resolveChatModelRequest("use your best reasoning model", registry).model?.id, "smart-text");
 });
 
 test("toModelCapability derives modalities and flags from the catalog shape", () => {

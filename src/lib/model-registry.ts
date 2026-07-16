@@ -246,3 +246,96 @@ export async function routeModelLive(
     return undefined;
   }
 }
+
+// ── Self-service model selection ───────────────────────────────────────────────
+// Resolving a user's model request ("switch to a faster model", "use glm",
+// "change to claude 4.8") to a concrete Venice model the agent can actually run
+// on. Venice serves open-weight models only, so a request for Claude/GPT/Gemini
+// resolves to nothing and the caller reports it plus real alternatives.
+
+/** Proprietary providers Venice does not host, used only to explain a miss. */
+const FOREIGN_PROVIDERS = [
+  "claude", "anthropic", "sonnet", "opus", "haiku",
+  "gpt", "openai", "chatgpt", "o1", "o3", "o4",
+  "gemini", "google", "bard", "palm", "grok", "copilot",
+];
+
+/** Text models that can actually back the interactive agent (need tool calling). */
+export function usableChatModels(models: ModelCapability[]): ModelCapability[] {
+  return models.filter((model) =>
+    (model.type === "text" || model.type === "code")
+    && model.modalities.output.includes("text")
+    && model.supportsTools);
+}
+
+export interface ChatModelResolution {
+  /** The resolved model, when the request maps to a real Venice chat model. */
+  model?: ModelCapability;
+  why?: string;
+  /** A recognized non-Venice provider named in the request, when nothing matched. */
+  foreign?: string;
+  /** A short, ranked list of switchable chat models to offer the user. */
+  alternatives: ModelCapability[];
+}
+
+function normalizeModelToken(value: string): string {
+  return value.toLowerCase().replace(/[\s._-]/g, "");
+}
+
+/**
+ * Map a free-form model request to a concrete Venice chat model. Precedence:
+ * exact id, then normalized substring/token match on the id, then a named but
+ * unavailable proprietary provider (reported, never guessed), then a descriptor
+ * ("fast"/"cheap"/"best reasoning") routed explainably. Always returns a handful
+ * of real alternatives so the caller can offer options on a miss.
+ */
+export function resolveChatModelRequest(request: string, models: ModelCapability[]): ChatModelResolution {
+  const usable = usableChatModels(models);
+  const suggest = (excludeId?: string): ModelCapability[] => {
+    if (!usable.length) return [];
+    const ranked = routeModel({ needsTools: true, outputModalities: ["text"], prefer: "balanced" }, usable);
+    const byId = new Map(usable.map((model) => [model.id, model]));
+    return ranked.candidates
+      .map((candidate) => byId.get(candidate.id))
+      .filter((model): model is ModelCapability => Boolean(model) && model!.id !== excludeId)
+      .slice(0, 5);
+  };
+  const raw = request.trim();
+  const q = raw.toLowerCase();
+  if (!q || !usable.length) return { alternatives: suggest() };
+
+  // 1. Exact id, then normalized substring ("glm 5.2" -> zai-org-glm-5-2).
+  const nq = normalizeModelToken(q);
+  let hit = usable.find((model) => model.id.toLowerCase() === q)
+    ?? (nq.length >= 3 ? usable.find((model) => normalizeModelToken(model.id).includes(nq)) : undefined);
+  if (!hit) {
+    const tokens = q.split(/[^a-z0-9.]+/i).map(normalizeModelToken).filter((token) => token.length >= 3);
+    if (tokens.length) {
+      hit = usable.find((model) => tokens.every((token) => normalizeModelToken(model.id).includes(token)))
+        ?? usable.find((model) => tokens.some((token) => normalizeModelToken(model.id).includes(token)));
+    }
+  }
+  if (hit) return { model: hit, why: `matched "${raw}"`, alternatives: suggest(hit.id) };
+
+  // 2. A specific but unavailable provider (Claude/GPT/Gemini/...): report, don't guess.
+  const foreign = FOREIGN_PROVIDERS.find((provider) => q.includes(provider));
+  if (foreign) return { foreign, alternatives: suggest() };
+
+  // 3. A descriptor ("fast", "cheap", "best reasoning"): route explainably.
+  if (/(fast|quick|cheap|small|light|efficient|reason|think|smart|best|strong|capable|deep|large|big|context)/.test(q)) {
+    const routed = routeModel({
+      needsTools: true,
+      outputModalities: ["text"],
+      needsReasoning: /(reason|think|smart|best|strong|capable|deep)/.test(q) || undefined,
+      taskHint: q,
+      prefer: /(cheap|fast|quick|small|light|efficient)/.test(q)
+        ? "cheapest"
+        : /(large|big|context)/.test(q) ? "largest_context" : "balanced",
+    }, usable);
+    const model = routed.model ? usable.find((candidate) => candidate.id === routed.model) : undefined;
+    if (model) return { model, why: routed.explanation, alternatives: suggest(model.id) };
+  }
+
+  // 4. Unrecognized: offer options.
+  return { alternatives: suggest() };
+}

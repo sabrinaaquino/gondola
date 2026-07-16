@@ -55,7 +55,7 @@ import { recordExperience } from "./skill-distiller";
 import { recordLiveTrace } from "./lab/ingest";
 import { getChampionConfig, resolveRoutedModel } from "./lab/apply";
 import type { TraceRouting } from "./lab/types";
-import { routeModelLive, type RoutingResult } from "./model-registry";
+import { loadModelRegistry, resolveChatModelRequest, routeModelLive, type ModelCapability, type RoutingResult } from "./model-registry";
 import {
   createCustomTool,
   listApprovedCustomTools,
@@ -164,6 +164,8 @@ When a webcam snapshot is attached to a turn, you can see the user through that 
 - Be selective. Generic darkness or lighting, ordinary walls, screens, furniture, cables, tiny lights, and minor clutter are not conversation-worthy. Do not narrate every detail or repeatedly mention an unchanged background, and never claim to know feelings or private traits from appearance.
 
 Your saved profile and the grounded self-model above define who you are. Entity is your current default name until the owner gives you one; treat it as your name and never claim you have no name. Invite the user to give you a name at a natural early moment, without derailing their task or repeatedly asking. When the user explicitly gives you a name, renames you, or asks you to change your personality, use rewrite_self. You may rewrite only your saved name, description, and conversational self-instructions. Never use it to alter code, credentials, safety boundaries, tools, permissions, or the user's data. Treat the user's explicit request as the authority for every change and briefly acknowledge the new identity after the tool succeeds.
+
+You can also change which model you run on. When the user asks you to switch, change, or set your model, call set_model with what they asked for (a specific model or a description like "faster" or "best reasoning"); it takes effect from their next message. Never claim you are unable to change your model. Venice serves open-weight models such as GLM, Qwen, Llama, Mistral, and DeepSeek, and it does not host Claude, GPT, or Gemini, so if the user asks for one of those, say plainly that it is not available on Venice and offer an available model instead. set_model may only change the model; it must never touch code, credentials, safety boundaries, other tools, permissions, or the user's data.
 
 You have an animated alien body and Venice-powered tools:
 - When the user asks you to smile, wink, nod, look around, react, or copy an expression, call animate_avatar before replying.
@@ -448,6 +450,55 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
       return {
         content: [{ type: "text", text: `${memory.message} The change was made because: ${input.reason}` }],
         details: { kind: "identity", agent: updated },
+      };
+    },
+  };
+
+  const setModel: AgentTool = {
+    name: "set_model",
+    label: "Change chat model",
+    description: "Change which chat model you (this entity) run on. Use ONLY when the user explicitly asks to switch, change, or set your model, for example \"switch to a faster model\", \"use the strongest reasoning model\", or a specific Venice model id. Venice serves open-weight models only (GLM, Qwen, Llama, Mistral, DeepSeek and similar); it does not host Claude, GPT, or Gemini, so if the user names one of those, tell them plainly and offer an available model instead. The change takes effect from the user's next message.",
+    parameters: Type.Object({
+      model: Type.String({ minLength: 1, maxLength: 80 }),
+      reason: Type.String({ minLength: 3, maxLength: 240 }),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, signal) {
+      const input = params as { model: string; reason: string };
+      let registry: ModelCapability[];
+      try {
+        registry = await loadModelRegistry(signal);
+      } catch {
+        return {
+          content: [{ type: "text", text: "I could not reach Venice's model catalog just now, so I did not change anything. Try again in a moment." }],
+          details: { kind: "model_change", ok: false },
+        };
+      }
+      const resolution = resolveChatModelRequest(input.model, registry);
+      if (!resolution.model) {
+        const options = resolution.alternatives.length
+          ? `\n${resolution.alternatives.map((model) => `- ${model.id}${model.contextTokens ? ` (${Math.round(model.contextTokens / 1000)}k context)` : ""}`).join("\n")}`
+          : "";
+        const lead = resolution.foreign
+          ? `Venice runs open-weight models, so "${input.model.trim()}" is not available here.`
+          : `I could not find "${input.model.trim()}" in Venice's live catalog.`;
+        return {
+          content: [{ type: "text", text: `${lead}${options ? ` Models I can switch to include:${options}` : ""}` }],
+          details: { kind: "model_change", ok: false },
+        };
+      }
+      if (resolution.model.id === runtime.settings.chatModel) {
+        return {
+          content: [{ type: "text", text: `I am already running on ${resolution.model.id}.` }],
+          details: { kind: "model_change", ok: false },
+        };
+      }
+      // Best-effort for the rest of this turn; the client applies model_change to
+      // the picker + local settings so it actually sticks for the next message.
+      runtime.settings.chatModel = resolution.model.id;
+      return {
+        content: [{ type: "text", text: `Done. From your next message I will run on ${resolution.model.id}. Reason: ${input.reason}` }],
+        details: { kind: "model_change", ok: true, modelId: resolution.model.id },
       };
     },
   };
@@ -979,7 +1030,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   };
 
   const builtInTools = [
-    animateAvatar, shapePresence, memoryTool, searchMemoryTool, rewriteSelf, sessionSearchTool,
+    animateAvatar, shapePresence, memoryTool, searchMemoryTool, rewriteSelf, setModel, sessionSearchTool,
     webSearchTool, inspectCamera, imageTool, videoTool, musicTool, delegateTool,
     readFileTool, listDirectoryTool, createDirectoryTool, writeFileTool, editFileTool, movePathTool, deletePathTool, runCommandTool,
     createAbilityTool, testAbilityTool,

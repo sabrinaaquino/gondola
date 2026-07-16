@@ -1985,6 +1985,10 @@ function Workspace() {
         ...current,
         agents: current.agents.map((agent) => agent.id === updatedAgent.id ? updatedAgent : agent),
       } : current);
+    } else if (details.kind === "model_change" && details.ok === true && typeof details.modelId === "string") {
+      // The agent changed its own model via set_model; reflect it in the picker
+      // and persisted settings so it takes effect from the next message.
+      changeChatModel(details.modelId as string);
     } else if (details.kind === "avatar" && typeof details.action === "string") {
       triggerAction(details.action as AvatarAction);
     } else if (details.kind === "presence" && details.directive) {
@@ -2028,7 +2032,7 @@ function Workspace() {
       return nextArtifact.id;
     }
     return undefined;
-  }, [pollArtifact, triggerAction]);
+  }, [changeChatModel, pollArtifact, triggerAction]);
 
   const addFiles = useCallback(async (fileList: FileList | File[]) => {
     const files = Array.from(fileList);
