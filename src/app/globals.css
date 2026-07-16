@@ -489,6 +489,51 @@ input:focus-visible {
 
 .model-picker-clear:hover { color: var(--ink); }
 
+/* Fast-mode toggle inside the model dropdown (the composer pill only shows the
+   Fast chip when it's ON, so this switch is how you turn it on/off). */
+.model-picker-fast {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: #aeb6c1;
+  text-align: left;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.model-picker-fast:hover { background: rgba(255, 255, 255, .035); }
+.model-picker-fast > svg { flex: 0 0 auto; color: #7f8894; fill: currentColor; transition: color .14s ease; }
+.model-picker-fast.is-active { color: #dbe4f1; }
+.model-picker-fast.is-active > svg { color: #c8cace; }
+.model-picker-fast-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.model-picker-fast-text strong { font-size: 11.5px; font-weight: 600; }
+.model-picker-fast-text small { color: #6c7480; font-size: 9.5px; }
+.model-picker-fast-switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .1);
+  transition: background .16s ease;
+}
+.model-picker-fast-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #cfd5dd;
+  transition: transform .16s ease, background .16s ease;
+}
+.model-picker-fast.is-active .model-picker-fast-switch { background: rgba(205, 208, 214, .55); }
+.model-picker-fast.is-active .model-picker-fast-switch i { transform: translateX(13px); background: #eef3fb; }
+
 .model-picker-list {
   display: flex;
   flex-direction: column;
@@ -4516,7 +4561,7 @@ input:focus-visible {
 
 .transcript,
 .workspace.entity-hidden .transcript {
-  padding: 24px clamp(20px, 4vw, 54px) 14px;
+  padding: 24px clamp(14px, 2.5vw, 28px) 14px;
   scrollbar-color: rgba(255, 255, 255, .12) transparent;
 }
 
