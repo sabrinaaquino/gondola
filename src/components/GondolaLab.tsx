@@ -105,6 +105,27 @@ const CSS = `
 .gl-live-toggle input { width: 14px; height: 14px; accent-color: var(--mint); cursor: pointer; }
 .gl-mini { display: flex; gap: 6px; margin-top: 8px; }
 .gl-mini .gl-btn { height: 28px; padding: 0 11px; font-size: 11px; }
+.gl-flow { display: flex; align-items: center; gap: 0; padding: 11px 24px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.gl-step { display: flex; align-items: center; gap: 7px; padding: 0 12px; white-space: nowrap; }
+.gl-step:not(:first-child)::before { content: ""; width: 16px; height: 1px; background: var(--line-bright); margin-right: 4px; }
+.gl-step-dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3f48; flex: 0 0 auto; }
+.gl-step-label { font-size: 11px; font-weight: 600; color: var(--faint); }
+.gl-step.done .gl-step-dot { background: #93c9a8; }
+.gl-step.done .gl-step-label { color: var(--muted); }
+.gl-step.current .gl-step-dot { background: var(--mint); box-shadow: 0 0 9px rgba(201,204,210,.6); }
+.gl-step.current .gl-step-label { color: var(--ink); }
+.gl-step.fail .gl-step-dot { background: var(--coral); box-shadow: 0 0 9px rgba(255,142,122,.5); }
+.gl-step.fail .gl-step-label { color: var(--coral); }
+.gl-hint { margin: 1px 8px 4px; color: #5f6672; font-size: 10.5px; line-height: 1.35; white-space: normal; }
+.gl-intro { max-width: 580px; }
+.gl-intro h3 { margin: 0 0 8px; color: var(--ink); font-size: 15px; font-weight: 640; }
+.gl-intro > p { margin: 0 0 12px; color: #c3c8d0; font-size: 13px; line-height: 1.6; }
+.gl-steps-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.gl-steps-list li { display: flex; gap: 10px; color: #c3c8d0; font-size: 12.5px; line-height: 1.5; }
+.gl-steps-list b { color: var(--ink); font-weight: 640; }
+.gl-steps-list .n { flex: 0 0 auto; width: 19px; height: 19px; border-radius: 6px; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: var(--mint); background: rgba(201,204,210,.1); }
+.gl-note { margin-top: 14px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.015); color: var(--muted); font-size: 12px; line-height: 1.55; }
+.gl-note b { color: var(--ink); }
 @media (max-width: 720px) {
   .gl-modal { width: calc(100vw - 24px); height: min(90vh, calc(100vh - 28px)); }
   .gl-body { grid-template-columns: 1fr; }
@@ -114,6 +135,31 @@ const CSS = `
 
 function pct(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+// The self-improvement loop, in plain language, so the panel explains itself.
+const STAGES = [
+  { key: "traces", label: "Traces", hint: "Every run the agent does is recorded as evidence the Lab learns from." },
+  { key: "proposal", label: "Proposal", hint: "The Lab drafts one small, bounded change tied to a recurring problem." },
+  { key: "evaluation", label: "Evaluation", hint: "Run the proposed change against the current setup on the same test tasks." },
+  { key: "gates", label: "Gates", hint: "Automatic safety checks: better quality, no regressions, within budget." },
+  { key: "approval", label: "Approval", hint: "You review and approve. Nothing is promoted on its own." },
+  { key: "live", label: "Live", hint: "Approved changes drive the live agent, and can be rolled back." },
+];
+
+// Where a proposal sits in the loop, so the stepper can highlight it.
+function stageForStatus(status?: string): { index: number; failed: boolean } {
+  switch (status) {
+    case "draft":
+    case "evaluating": return { index: 2, failed: false };
+    case "failed": return { index: 3, failed: true };
+    case "ready_for_review": return { index: 4, failed: false };
+    case "approved":
+    case "promoted": return { index: 5, failed: false };
+    case "rejected": return { index: 4, failed: true };
+    case "rolled_back": return { index: 5, failed: true };
+    default: return { index: -1, failed: false };
+  }
 }
 
 export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaLabProps) {
@@ -211,6 +257,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
   const proposal = detail?.proposal;
   const report = detail?.evaluation?.report;
   const pendingAbilities = abilities.filter((ability) => ability.status === "pending");
+  const flow = proposal ? stageForStatus(proposal.status) : { index: -1, failed: false };
 
   return (
     <>
@@ -226,13 +273,24 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         </header>
 
         <div className="gl-toolbar">
-          <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void act("seed_demo")}>Seed demo run</button>
-          <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("generate_proposal")}>Generate proposal</button>
-          <button className="gl-btn" disabled={Boolean(busy) || !snapshot?.history.some((record) => record.action === "promote")} onClick={() => void act("rollback", { approvedBy: approver || "user" })}>Rollback champion</button>
-          <span className="gl-champ">
+          <button className="gl-btn" disabled={Boolean(busy)} title="Create example runs so you can see the Lab work without waiting for real usage." onClick={() => void act("seed_demo")}>Seed demo run</button>
+          <button className="gl-btn primary" disabled={Boolean(busy)} title="Analyze recent traces and draft one safe, bounded change to test." onClick={() => void act("generate_proposal")}>Generate proposal</button>
+          <button className="gl-btn" disabled={Boolean(busy) || !snapshot?.history.some((record) => record.action === "promote")} title="Return the live agent to its previous configuration." onClick={() => void act("rollback", { approvedBy: approver || "user" })}>Rollback champion</button>
+          <span className="gl-champ" title="The configuration the live agent is using right now.">
             Champion <b>{champion ? champion.versionId.slice(0, 8) : "none"}</b>
             {policy ? ` · ${policy.conceptCount} concept(s), critic ${policy.useSeparateCritic ? "on" : "off"}, gate ${policy.requireAnalyzeBeforeAnimate ? "on" : "off"}` : ""}
           </span>
+        </div>
+
+        <div className="gl-flow">
+          {STAGES.map((stage, index) => {
+            const cls = flow.index < 0 ? "" : index < flow.index ? "done" : index === flow.index ? (flow.failed ? "fail" : "current") : "";
+            return (
+              <div key={stage.key} className={`gl-step ${cls}`} title={stage.hint}>
+                <span className="gl-step-dot" /><span className="gl-step-label">{stage.label}</span>
+              </div>
+            );
+          })}
         </div>
 
         {error ? <div className="gl-err">{error}</div> : null}
@@ -240,6 +298,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         <div className="gl-body">
           <div className="gl-rail">
             <h3>Proposals</h3>
+            <p className="gl-hint">Suggested changes to the agent, waiting to be tested or approved.</p>
             {snapshot?.proposals.length
               ? snapshot.proposals.map((item) => (
                 <button key={item.proposalId} className={`gl-prop${selected === item.proposalId ? " is-active" : ""}`} onClick={() => setSelected(item.proposalId)}>
@@ -250,6 +309,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
               : <p className="muted" style={{ margin: "4px 8px" }}>No proposals yet. Seed a run, then generate one.</p>}
 
             <h3>Pending abilities</h3>
+            <p className="gl-hint">Tools the agent wrote for itself. They stay off until you approve them.</p>
             {pendingAbilities.length
               ? pendingAbilities.map((ability) => (
                 <div key={ability.id} className="gl-card">
@@ -264,6 +324,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
               : <p className="muted" style={{ margin: "4px 8px" }}>No abilities awaiting approval.</p>}
 
             <h3>Recent traces</h3>
+            <p className="gl-hint">What actually happened on recent runs, the evidence the Lab learns from.</p>
             {snapshot?.traces.slice(0, 6).map((trace) => (
               <div key={trace.runId} className="gl-card">
                 <strong style={{ fontWeight: 500, fontSize: "11px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{trace.goal.slice(0, 60)}</strong>
@@ -274,7 +335,22 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
 
           <div className="gl-detail">
             {!proposal ? (
-              <div className="gl-empty">Select a proposal to see its evidence, configuration diff, and champion vs challenger evaluation.</div>
+              snapshot?.proposals.length ? (
+                <div className="gl-empty">Select a proposal on the left to see its evidence, the exact change it makes, and how it scored against the current setup.</div>
+              ) : (
+                <div className="gl-intro">
+                  <h3>What Gondola Lab does</h3>
+                  <p>This is the agent&rsquo;s control plane, separate from the agent that does the work. It watches how the agent actually performs, drafts small safe changes to improve it, tests each one against the current setup, and asks you before anything goes live.</p>
+                  <ol className="gl-steps-list">
+                    <li><span className="n">1</span><span><b>Reads real traces.</b> Every run the agent does is recorded as evidence.</span></li>
+                    <li><span className="n">2</span><span><b>Proposes one bounded change.</b> A single safe tweak tied to a recurring problem, never a free-for-all rewrite.</span></li>
+                    <li><span className="n">3</span><span><b>Tests champion vs challenger.</b> The current live config (&ldquo;champion&rdquo;) runs head-to-head against the proposed one (&ldquo;challenger&rdquo;) on the same tasks.</span></li>
+                    <li><span className="n">4</span><span><b>Checks safety gates.</b> A change is only offered if it improves quality, adds no regressions, and stays within budget.</span></li>
+                    <li><span className="n">5</span><span><b>You approve.</b> Nothing is promoted automatically. Every change is versioned and can be rolled back.</span></li>
+                  </ol>
+                  <div className="gl-note"><b>New here?</b> Click <b>Seed demo run</b> to create example data, then <b>Generate proposal</b> and open it to run an evaluation and watch the full loop.</div>
+                </div>
+              )
             ) : (
               <>
                 <h4>Observed problem</h4>
@@ -284,6 +360,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 <p className="muted">Evidence: {proposal.traceEvidence.length} trace(s) · target {proposal.targetMetric} · risk {proposal.riskLevel}</p>
 
                 <h4>Configuration diff</h4>
+                <p className="gl-hint" style={{ margin: "0 0 6px" }}>The exact settings this change would alter.</p>
                 {detail?.diff.length ? (
                   <table className="gl-table">
                     <thead><tr><th>Field</th><th>Champion</th><th>Challenger</th></tr></thead>
@@ -305,6 +382,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                 {report ? (
                   <>
                     <h4>Champion vs challenger</h4>
+                    <p className="gl-hint" style={{ margin: "0 0 6px" }}>Champion is the current live config; challenger is the proposed one, run on the same tasks. Higher quality, lower cost, and fewer interventions are better.</p>
                     <table className="gl-table">
                       <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Δ</th></tr></thead>
                       <tbody>
@@ -316,6 +394,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                     </table>
 
                     <h4>Gates</h4>
+                    <p className="gl-hint" style={{ margin: "0 0 6px" }}>Automatic safety checks a change must pass before you can promote it.</p>
                     {report.gates.map((gate) => (
                       <div key={gate.name} className={`gl-gate ${gate.passed ? "pass" : "fail"}`}><i />{gate.name.replace(/_/g, " ")} <small>{gate.detail}</small></div>
                     ))}
