@@ -2085,6 +2085,10 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
       recovered: recovery.recovered,
       pendingMedia: resumableTasks.length,
     }).catch(() => undefined);
+    // Async Lab review after recovery: if a failure pattern is emerging, let the
+    // outer loop draft a bounded proposal in the background. Best-effort; it never
+    // blocks the turn and never promotes — proposals still require human approval.
+    void generateProposal(`Automatic review after a ${recovery.category} failure the supervisor handled.`).catch(() => undefined);
     if (recovery.text) {
       await appendSessionRecord({
         sessionId: input.sessionId,
