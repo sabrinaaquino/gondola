@@ -272,7 +272,7 @@ export interface RunEvaluationInput {
   cases?: EvaluationCase[];
   seed?: number;
   runTask?: TaskRunner;
-  judge?: (trace: RunTrace) => number;
+  judge?: (trace: RunTrace) => number | Promise<number>;
   reviewerVisibleCaseIds?: string[];
   persist?: boolean;
 }
@@ -335,9 +335,9 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
   }
 }
 
-async function gradeAndFinalize(trace: RunTrace, judge: (trace: RunTrace) => number, persist: boolean): Promise<RunTrace> {
+async function gradeAndFinalize(trace: RunTrace, judge: (trace: RunTrace) => number | Promise<number>, persist: boolean): Promise<RunTrace> {
   const deterministic = gradeDeterministic(trace);
-  const semantic = { judgeConfigVersion: JUDGE_CONFIG.version, score: judge(trace), rationale: "Simulated fixed judge score from trace evidence." };
+  const semantic = { judgeConfigVersion: JUDGE_CONFIG.version, score: await judge(trace), rationale: "Fixed judge score from trace evidence." };
   const finalized: RunTrace = { ...trace, deterministic, semantic, finalized: true, finalizedAt: new Date().toISOString() };
   if (persist) await saveTrace(finalized);
   return finalized;

@@ -32,9 +32,17 @@ interface ProposalDetail {
   evaluation: EvaluationRecord | null;
 }
 
+interface Ability {
+  id: string;
+  name: string;
+  description: string;
+  status: "pending" | "approved";
+}
+
 interface GondolaLabProps {
   open: boolean;
   onClose: () => void;
+  agentId?: string;
 }
 
 const CSS = `
@@ -84,19 +92,25 @@ const CSS = `
 .gl-approver:focus { border-color: rgba(184,207,232,.45); }
 .gl-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
 .gl-err { color: var(--coral); font-size: 12px; margin: 8px 20px; }
+.gl-live-toggle { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; cursor: pointer; }
+.gl-live-toggle input { accent-color: var(--mint); }
+.gl-mini { display: flex; gap: 6px; margin-top: 7px; }
+.gl-mini .gl-btn { height: 26px; padding: 0 10px; font-size: 11px; }
 `;
 
 function pct(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
 }
 
-export function GondolaLab({ open, onClose }: GondolaLabProps) {
+export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaLabProps) {
   const [snapshot, setSnapshot] = useState<LabSnapshot | null>(null);
   const [selected, setSelected] = useState<string>("");
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [approver, setApprover] = useState("");
+  const [live, setLive] = useState(false);
+  const [abilities, setAbilities] = useState<Ability[]>([]);
 
   const loadSnapshot = useCallback(async () => {
     const response = await fetch("/api/lab", { cache: "no-store" });
@@ -109,9 +123,40 @@ export function GondolaLab({ open, onClose }: GondolaLabProps) {
     if (response.ok) setDetail(await response.json() as ProposalDetail);
   }, []);
 
+  const loadAbilities = useCallback(async () => {
+    const response = await fetch("/api/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "list_abilities", agentId }),
+    });
+    if (response.ok) {
+      const payload = await response.json().catch(() => ({})) as { abilities?: Ability[] };
+      setAbilities(payload.abilities ?? []);
+    }
+  }, [agentId]);
+
+  const actAbility = useCallback(async (action: "approve_ability" | "delete_ability", id: string) => {
+    setBusy(`${action}:${id}`);
+    setError("");
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, agentId, id, approvedBy: approver || "owner" }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? `Request failed (${response.status}).`);
+      await loadAbilities();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Request failed.");
+    } finally {
+      setBusy("");
+    }
+  }, [agentId, approver, loadAbilities]);
+
   useEffect(() => {
-    if (open) void loadSnapshot();
-  }, [open, loadSnapshot]);
+    if (open) { void loadSnapshot(); void loadAbilities(); }
+  }, [open, loadSnapshot, loadAbilities]);
 
   useEffect(() => {
     if (open && selected) void loadDetail(selected);
@@ -190,6 +235,20 @@ export function GondolaLab({ open, onClose }: GondolaLabProps) {
                 </button>
               ))
               : <p className="muted" style={{ margin: "6px" }}>No proposals yet. Seed a run, then generate one.</p>}
+            <h3>Pending abilities</h3>
+            {abilities.filter((ability) => ability.status === "pending").length
+              ? abilities.filter((ability) => ability.status === "pending").map((ability) => (
+                <div key={ability.id} className="gl-prop" style={{ cursor: "default" }}>
+                  <small style={{ marginTop: 0, color: "var(--ink)" }}>{ability.name}</small>
+                  <small>{ability.description}</small>
+                  <div className="gl-mini">
+                    <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", ability.id)}>Approve</button>
+                    <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>Reject</button>
+                  </div>
+                </div>
+              ))
+              : <p className="muted" style={{ margin: "6px" }}>No abilities awaiting approval.</p>}
+
             <h3>Recent traces</h3>
             {snapshot?.traces.slice(0, 6).map((trace) => (
               <div key={trace.runId} className="gl-prop" style={{ cursor: "default" }}>
@@ -224,7 +283,8 @@ export function GondolaLab({ open, onClose }: GondolaLabProps) {
 
                 {proposal.status === "draft" && (
                   <div className="gl-actions">
-                    <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId })}>Run evaluation</button>
+                    <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>{live ? "Run live evaluation" : "Run evaluation"}</button>
+                    <label className="gl-live-toggle"><input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Run live (real inference, spends budget)</label>
                   </div>
                 )}
 

@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       return Response.json({ proposal });
     }
     if (action === "evaluate_proposal") {
-      const record = await evaluateProposal(String(body.proposalId ?? ""));
+      const record = await evaluateProposal(String(body.proposalId ?? ""), { live: body.live === true });
       return Response.json({ evaluation: record });
     }
     if (action === "promote") {

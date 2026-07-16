@@ -31,6 +31,7 @@ import { ModelPicker } from "@/components/ModelPicker";
 import { SettingsDrawer } from "@/components/SettingsDrawer";
 import { WorkspaceDrawer, type WorkspaceTab } from "@/components/WorkspaceDrawer";
 import { ConversationSearch } from "@/components/ConversationSearch";
+import { GondolaLab } from "@/components/GondolaLab";
 import { Onboarding, type SetupStatusView } from "@/components/Onboarding";
 import {
   DEFAULT_SETTINGS,
@@ -686,6 +687,7 @@ function Workspace() {
   const [activeAgentId, setActiveAgentId] = useState("");
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);
   const [xrayOpen, setXrayOpen] = useState(false);
+  const [labOpen, setLabOpen] = useState(false);
   const [settings, setSettings] = useState<AgentSettings>(DEFAULT_SETTINGS);
   const [models, setModels] = useState<CatalogModel[]>([]);
   const [connected, setConnected] = useState(false);
@@ -3427,6 +3429,7 @@ function Workspace() {
               <button className={`topbar-nav ${workspaceOpen && workspaceTab === "memory" ? "is-active" : ""}`} onClick={() => { setWorkspaceTab("memory"); setWorkspaceOpen(true); }}><MemoryIcon size={16} /><span>Personal memory</span></button>
               <button className={`topbar-nav ${workspaceOpen && workspaceTab === "connections" ? "is-active" : ""}`} onClick={() => { setWorkspaceTab("connections"); setWorkspaceOpen(true); }}><PlugIcon size={15} /><span>Connections</span></button>
               <button className={`topbar-nav ${workspaceOpen && workspaceTab === "automations" ? "is-active" : ""}`} onClick={() => { setWorkspaceTab("automations"); setWorkspaceOpen(true); }}><ClockIcon size={16} /><span>Automations</span></button>
+              <button className={`topbar-nav ${labOpen ? "is-active" : ""}`} onClick={() => { setWorkspaceOpen(false); setSettingsOpen(false); setXrayOpen(false); setLabOpen(true); }}><SparkleIcon size={16} /><span>Gondola Lab</span></button>
             </div>
           </div>
         </nav>
@@ -3890,6 +3893,8 @@ function Workspace() {
       )}
 
       <ApiXray open={xrayOpen} onClose={() => setXrayOpen(false)} models={models} />
+
+      <GondolaLab open={labOpen} onClose={() => setLabOpen(false)} agentId={activeAgentId} />
 
       {lightbox && (
         <button className="media-lightbox" onClick={() => setLightbox(null)} aria-label="Close preview">

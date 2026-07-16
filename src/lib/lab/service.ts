@@ -25,6 +25,7 @@ import {
   simulatedTaskRunner,
 } from "./evaluation";
 import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, reviewTraces } from "./reviewer";
+import { createLiveJudge, createLiveTaskRunner, makeLiveRunAgent } from "./runner";
 import type { ConfigVersion, EvaluationRecord, ImprovementProposal, RunTrace } from "./types";
 
 export async function ensureChampion(): Promise<ConfigVersion> {
@@ -89,8 +90,12 @@ export async function generateProposal(): Promise<ImprovementProposal | null> {
   return saveProposal(proposal);
 }
 
-/** Evaluate a proposal's challenger against the champion across all cases. */
-export async function evaluateProposal(proposalId: string): Promise<EvaluationRecord> {
+/**
+ * Evaluate a proposal's challenger against the champion across all cases.
+ * With `live`, it runs the actual agent (real Venice inference, real judge)
+ * instead of the deterministic simulation; otherwise it stays offline.
+ */
+export async function evaluateProposal(proposalId: string, opts?: { live?: boolean }): Promise<EvaluationRecord> {
   const proposal = await getProposal(proposalId);
   if (!proposal?.challengerVersionId) throw new Error("Proposal has no challenger to evaluate.");
   const champion = await ensureChampion();
@@ -105,6 +110,7 @@ export async function evaluateProposal(proposalId: string): Promise<EvaluationRe
     cases: CASE_REGISTRY,
     seed: 1,
     reviewerVisibleCaseIds: reviewerVisibleCases().map((testCase) => testCase.id),
+    ...(opts?.live ? { runTask: createLiveTaskRunner(makeLiveRunAgent()), judge: createLiveJudge() } : {}),
   });
   await saveProposal({
     ...proposal,
