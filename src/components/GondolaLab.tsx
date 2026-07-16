@@ -45,57 +45,71 @@ interface GondolaLabProps {
   agentId?: string;
 }
 
+// Styled to match the app's control-center chrome (see .settings-modal in
+// globals.css): the same scrim, panel surface, radius, header, buttons, and
+// desaturated token palette, so the Lab reads as part of the app, not a bolt-on.
 const CSS = `
-.gl-scrim { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: rgba(4,5,9,.62); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); animation: gl-fade .16s ease; }
-@keyframes gl-fade { from { opacity: 0; } to { opacity: 1; } }
-.gl-panel { display: flex; flex-direction: column; width: 100%; max-width: 1200px; height: min(90vh, 880px); border: 1px solid var(--line); border-radius: 22px; background: linear-gradient(160deg, rgba(20,22,28,.98), rgba(8,9,13,.99)); box-shadow: var(--shadow), 0 40px 100px -34px rgba(0,0,0,.85); overflow: hidden; }
-.gl-head { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px 16px; border-bottom: 1px solid var(--line); }
-.gl-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.gl-kicker { color: var(--mint); font-size: 8px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
-.gl-head h2 { margin: 0; color: var(--ink); font-size: 17px; font-weight: 640; letter-spacing: -.02em; }
-.gl-head p { margin: 0; color: var(--faint); font-size: 11.5px; }
-.gl-close { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: transparent; cursor: pointer; }
-.gl-close:hover { color: var(--ink); border-color: var(--line-bright); background: rgba(255,255,255,.05); }
-.gl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
-.gl-btn { height: 32px; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: rgba(255,255,255,.03); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .14s, background .14s; }
-.gl-btn:hover:not(:disabled) { border-color: var(--line-bright); background: rgba(255,255,255,.06); }
+.gl-scrim { position: fixed; z-index: 88; inset: 0; visibility: hidden; border: 0; background: rgba(1,5,4,0); -webkit-backdrop-filter: blur(0); backdrop-filter: blur(0); cursor: default; transition: 280ms ease; }
+.gl-scrim.is-open { visibility: visible; background: rgba(1,5,4,.54); -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); }
+.gl-modal { position: fixed; z-index: 89; top: 50%; left: 50%; width: min(1080px, calc(100vw - 40px)); height: min(680px, calc(100vh - 64px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-bright); border-radius: 20px; background: var(--panel-strong); -webkit-backdrop-filter: blur(22px); backdrop-filter: blur(22px); box-shadow: var(--shadow); opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, -47%) scale(.985); transition: opacity 200ms ease, transform 240ms cubic-bezier(.2,.8,.2,1), visibility 200ms ease; }
+.gl-modal.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
+.gl-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 18px 16px 24px; border-bottom: 1px solid var(--line); }
+.gl-head h2 { margin: 0; font-size: 18px; font-weight: 640; letter-spacing: -.01em; color: var(--ink); }
+.gl-head p { margin: 3px 0 0; max-width: 560px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.gl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--line); }
+.gl-btn { height: 34px; padding: 0 14px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: rgba(255,255,255,.035); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color 180ms ease, background 180ms ease, color 180ms ease; }
+.gl-btn:hover:not(:disabled) { border-color: var(--line-bright); background: rgba(255,255,255,.065); }
 .gl-btn:disabled { opacity: .4; cursor: default; }
-.gl-btn.primary { color: #11151b; background: linear-gradient(145deg, #f7f6f2, #b7c9dd); border: 0; }
-.gl-btn.danger { color: var(--coral); border-color: rgba(255,142,122,.3); }
-.gl-champ { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 11px; }
-.gl-champ b { color: var(--mint); font-variant-numeric: tabular-nums; }
-.gl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0,1fr); }
-.gl-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
-.gl-rail h3 { margin: 4px 6px; color: var(--faint); font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.gl-prop { text-align: left; border: 1px solid var(--line); border-radius: 11px; background: transparent; color: var(--ink); padding: 9px 11px; cursor: pointer; transition: border-color .14s, background .14s; }
-.gl-prop:hover { border-color: var(--line-bright); }
-.gl-prop.is-active { border-color: rgba(184,207,232,.42); background: rgba(184,207,232,.06); }
-.gl-prop small { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gl-status { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.gl-status.ready_for_review, .gl-status.promoted { color: #8bbf9d; background: rgba(139,191,157,.12); }
+.gl-btn.primary { color: #11151b; background: linear-gradient(145deg, #f7f6f2, #b7c9dd); border: 0; font-weight: 650; }
+.gl-btn.primary:hover:not(:disabled) { background: linear-gradient(145deg, #ffffff, #c4d2e2); }
+.gl-btn.danger { color: var(--coral); border-color: rgba(255,142,122,.28); background: rgba(255,142,122,.06); }
+.gl-btn.danger:hover:not(:disabled) { border-color: rgba(255,142,122,.5); background: rgba(255,142,122,.1); }
+.gl-champ { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; }
+.gl-champ b { color: var(--mint); font-weight: 640; font-variant-numeric: tabular-nums; }
+.gl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(0,1fr); }
+.gl-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; }
+.gl-rail h3 { margin: 14px 8px 5px; color: #6b727f; font-size: 8.5px; font-weight: 680; letter-spacing: .12em; text-transform: uppercase; }
+.gl-rail h3:first-child { margin-top: 2px; }
+.gl-prop { text-align: left; border: 1px solid transparent; border-radius: 11px; background: transparent; color: var(--ink); padding: 9px 11px; cursor: pointer; transition: background .12s ease, color .12s ease, border-color .12s ease; }
+.gl-prop:hover { background: rgba(255,255,255,.03); }
+.gl-prop.is-active { background: rgba(205,208,214,.09); border-color: var(--line-bright); }
+.gl-prop small, .gl-card small { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-card { border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.015); padding: 9px 11px; }
+.gl-card strong { display: block; color: var(--ink); font-size: 12px; font-weight: 600; }
+.gl-status { display: inline-block; padding: 1.5px 8px; border-radius: 999px; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.gl-status.ready_for_review, .gl-status.promoted, .gl-status.approved { color: #93c9a8; background: rgba(147,201,168,.12); }
 .gl-status.failed, .gl-status.rejected, .gl-status.rolled_back { color: var(--coral); background: rgba(255,142,122,.12); }
-.gl-status.draft, .gl-status.evaluating { color: var(--aqua); background: rgba(159,183,210,.12); }
-.gl-detail { overflow-y: auto; padding: 16px 20px; color: #ccd2da; font-size: 13px; }
-.gl-detail h4 { margin: 16px 0 7px; color: var(--ink); font-size: 12px; font-weight: 660; letter-spacing: .01em; }
-.gl-detail p { margin: 0 0 6px; line-height: 1.6; }
+.gl-status.draft, .gl-status.evaluating, .gl-status.pending { color: var(--amber); background: rgba(255,202,112,.12); }
+.gl-detail { overflow-y: auto; padding: 20px 24px 26px; color: var(--muted); font-size: 13px; }
+.gl-detail h4 { margin: 18px 0 8px; color: var(--ink); font-size: 13px; font-weight: 640; letter-spacing: -.005em; }
+.gl-detail h4:first-child { margin-top: 0; }
+.gl-detail p { margin: 0 0 7px; line-height: 1.6; color: #c3c8d0; }
 .gl-detail .muted { color: var(--faint); font-size: 12px; }
-.gl-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
-.gl-table th, .gl-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
-.gl-table th { color: var(--faint); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
-.gl-up { color: #8bbf9d; } .gl-down { color: var(--coral); }
-.gl-gate { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
-.gl-gate i { width: 7px; height: 7px; border-radius: 50%; }
-.gl-gate.pass i { background: #8bbf9d; } .gl-gate.fail i { background: var(--coral); }
+.gl-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.gl-table th, .gl-table td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.gl-table th { color: #6b727f; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.gl-table td { color: #c3c8d0; }
+.gl-up { color: #93c9a8; } .gl-down { color: var(--coral); }
+.gl-gate { display: flex; align-items: center; gap: 9px; padding: 5px 0; font-size: 12px; color: #c3c8d0; }
+.gl-gate i { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.gl-gate.pass i { background: #93c9a8; box-shadow: 0 0 8px rgba(147,201,168,.5); }
+.gl-gate.fail i { background: var(--coral); box-shadow: 0 0 8px rgba(255,142,122,.5); }
 .gl-gate small { color: var(--faint); }
-.gl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
-.gl-approver { height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.03); color: var(--ink); font: inherit; font-size: 12px; outline: none; }
-.gl-approver:focus { border-color: rgba(184,207,232,.45); }
-.gl-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
-.gl-err { color: var(--coral); font-size: 12px; margin: 8px 20px; }
-.gl-live-toggle { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; cursor: pointer; }
-.gl-live-toggle input { accent-color: var(--mint); }
-.gl-mini { display: flex; gap: 6px; margin-top: 7px; }
-.gl-mini .gl-btn { height: 26px; padding: 0 10px; font-size: 11px; }
+.gl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.gl-approver { height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.035); color: var(--ink); font: inherit; font-size: 12px; outline: none; transition: border-color 180ms ease; }
+.gl-approver:focus { border-color: var(--line-bright); }
+.gl-approver::placeholder { color: var(--faint); }
+.gl-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; line-height: 1.6; }
+.gl-err { color: var(--coral); font-size: 12px; margin: 10px 24px 0; }
+.gl-live-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11.5px; cursor: pointer; }
+.gl-live-toggle input { width: 14px; height: 14px; accent-color: var(--mint); cursor: pointer; }
+.gl-mini { display: flex; gap: 6px; margin-top: 8px; }
+.gl-mini .gl-btn { height: 28px; padding: 0 11px; font-size: 11px; }
+@media (max-width: 720px) {
+  .gl-modal { width: calc(100vw - 24px); height: min(90vh, calc(100vh - 28px)); }
+  .gl-body { grid-template-columns: 1fr; }
+  .gl-rail { border-right: 0; border-bottom: 1px solid var(--line); max-height: 200px; }
+}
 `;
 
 function pct(value: number): string {
@@ -192,24 +206,23 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  if (!open) return null;
-
   const champion = snapshot?.champion;
   const policy = champion?.config.workflowPolicy;
   const proposal = detail?.proposal;
   const report = detail?.evaluation?.report;
+  const pendingAbilities = abilities.filter((ability) => ability.status === "pending");
 
   return (
-    <div className="gl-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <>
       <style>{CSS}</style>
-      <section className="gl-panel" role="dialog" aria-modal="true" aria-label="Gondola Lab">
+      <button className={`gl-scrim ${open ? "is-open" : ""}`} onClick={onClose} aria-label="Dismiss Gondola Lab" tabIndex={open ? 0 : -1} />
+      <section className={`gl-modal ${open ? "is-open" : ""}`} role="dialog" aria-modal="true" aria-label="Gondola Lab" aria-hidden={!open}>
         <header className="gl-head">
-          <div className="gl-titles">
-            <span className="gl-kicker">Gondola Lab</span>
-            <h2>Champion vs challenger</h2>
-            <p>An external control plane proposes and validates config changes. Nothing promotes without your approval.</p>
+          <div>
+            <h2>Gondola Lab</h2>
+            <p>An external control plane that observes traces and proposes config changes. Nothing promotes, and no ability goes live, without your approval.</p>
           </div>
-          <button className="gl-close" onClick={onClose} aria-label="Close Gondola Lab"><CloseIcon size={16} /></button>
+          <button className="icon-button" onClick={onClose} aria-label="Close Gondola Lab"><CloseIcon size={20} /></button>
         </header>
 
         <div className="gl-toolbar">
@@ -234,12 +247,13 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                   <small>{item.observedProblem}</small>
                 </button>
               ))
-              : <p className="muted" style={{ margin: "6px" }}>No proposals yet. Seed a run, then generate one.</p>}
+              : <p className="muted" style={{ margin: "4px 8px" }}>No proposals yet. Seed a run, then generate one.</p>}
+
             <h3>Pending abilities</h3>
-            {abilities.filter((ability) => ability.status === "pending").length
-              ? abilities.filter((ability) => ability.status === "pending").map((ability) => (
-                <div key={ability.id} className="gl-prop" style={{ cursor: "default" }}>
-                  <small style={{ marginTop: 0, color: "var(--ink)" }}>{ability.name}</small>
+            {pendingAbilities.length
+              ? pendingAbilities.map((ability) => (
+                <div key={ability.id} className="gl-card">
+                  <strong>{ability.name}</strong>
                   <small>{ability.description}</small>
                   <div className="gl-mini">
                     <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", ability.id)}>Approve</button>
@@ -247,12 +261,12 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
                   </div>
                 </div>
               ))
-              : <p className="muted" style={{ margin: "6px" }}>No abilities awaiting approval.</p>}
+              : <p className="muted" style={{ margin: "4px 8px" }}>No abilities awaiting approval.</p>}
 
             <h3>Recent traces</h3>
             {snapshot?.traces.slice(0, 6).map((trace) => (
-              <div key={trace.runId} className="gl-prop" style={{ cursor: "default" }}>
-                <small style={{ marginTop: 0 }}>{trace.goal.slice(0, 60)}</small>
+              <div key={trace.runId} className="gl-card">
+                <strong style={{ fontWeight: 500, fontSize: "11px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{trace.goal.slice(0, 60)}</strong>
                 <small>q {trace.quality.toFixed(1)} · ${trace.costUsd.toFixed(2)} · {trace.humanInterventions} interventions · {trace.deterministicPassed ? "checks pass" : "checks fail"}</small>
               </div>
             ))}
@@ -339,6 +353,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
           </div>
         </div>
       </section>
-    </div>
+    </>
   );
 }
