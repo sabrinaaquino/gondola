@@ -6,6 +6,7 @@ import type {
   EvaluationRecord,
   ImprovementProposal,
   PromotionRecord,
+  WorkflowPolicy,
 } from "@/lib/lab/types";
 
 interface TraceSummary {
@@ -45,117 +46,138 @@ interface GondolaLabProps {
   agentId?: string;
 }
 
-// Styled to match the app's control-center chrome (see .settings-modal in
-// globals.css): the same scrim, panel surface, radius, header, buttons, and
-// desaturated token palette, so the Lab reads as part of the app, not a bolt-on.
+// Plain-language surface. Everything a newcomer reads is in human words; the
+// internal vocabulary (proposal / champion / challenger / gates / promote) stays
+// in the code and API, never on screen.
+const STATUS: Record<string, { text: string; cls: string }> = {
+  draft: { text: "Ready to test", cls: "s-todo" },
+  evaluating: { text: "Testing\u2026", cls: "s-testing" },
+  ready_for_review: { text: "Ready to review", cls: "s-ready" },
+  failed: { text: "Didn't pass", cls: "s-fail" },
+  promoted: { text: "Applied", cls: "s-applied" },
+  rejected: { text: "Dismissed", cls: "s-muted" },
+  rolled_back: { text: "Undone", cls: "s-muted" },
+};
+
+const GATE_LABELS: Record<string, string> = {
+  target_metric_improved: "Quality improved",
+  no_critical_regression: "Didn't break anything it used to do",
+  no_replay_regression: "Older tasks still work",
+  cost_within_tolerance: "Cost stayed within limit",
+};
+
+const GATE_FAILS: Record<string, string> = {
+  target_metric_improved: "quality didn't improve enough",
+  no_critical_regression: "it broke something it used to do",
+  no_replay_regression: "some older tasks stopped working",
+  cost_within_tolerance: "it costs too much more",
+};
+
+function titleForPatch(patch: Partial<WorkflowPolicy>): string {
+  if (patch.requireAnalyzeBeforeAnimate) return "Review images before making videos";
+  if (patch.useSeparateCritic) return "Add a review step to catch weak results";
+  if (typeof patch.conceptCount === "number" && patch.conceptCount > 1) return "Try a few concepts before choosing";
+  if (patch.reviseBelowQuality != null || (typeof patch.maxRevisions === "number" && patch.maxRevisions > 0)) return "Revise weak results automatically";
+  return "Suggested improvement";
+}
+
+function humanizeChange(field: string, from: unknown, to: unknown): { now: string; suggested: string } {
+  const key = field.replace(/^workflowPolicy\./, "");
+  switch (key) {
+    case "requireAnalyzeBeforeAnimate":
+      return { now: "Animates images right away.", suggested: "Reviews each image before animating it." };
+    case "useSeparateCritic":
+      return { now: "No separate review step.", suggested: "Adds a step to catch weak results before finishing." };
+    case "conceptCount":
+      return { now: `Tries ${from} concept${Number(from) === 1 ? "" : "s"}.`, suggested: `Tries ${to} concepts, then picks the strongest.` };
+    case "reviseBelowQuality":
+      return { now: "Doesn't revise automatically.", suggested: `Revises when quality is below ${to}/10.` };
+    case "maxRevisions":
+      return { now: `Up to ${from} revision${Number(from) === 1 ? "" : "s"}.`, suggested: `Up to ${to} revisions.` };
+    case "budgetUsd":
+      return { now: `Spend limit $${from}.`, suggested: `Spend limit $${to}.` };
+    default:
+      return { now: String(from), suggested: String(to) };
+  }
+}
+
 const CSS = `
 .gl-scrim { position: fixed; z-index: 88; inset: 0; visibility: hidden; border: 0; background: rgba(1,5,4,0); -webkit-backdrop-filter: blur(0); backdrop-filter: blur(0); cursor: default; transition: 280ms ease; }
 .gl-scrim.is-open { visibility: visible; background: rgba(1,5,4,.54); -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); }
-.gl-modal { position: fixed; z-index: 89; top: 50%; left: 50%; width: min(1080px, calc(100vw - 40px)); height: min(680px, calc(100vh - 64px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-bright); border-radius: 20px; background: var(--panel-strong); -webkit-backdrop-filter: blur(22px); backdrop-filter: blur(22px); box-shadow: var(--shadow); opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, -47%) scale(.985); transition: opacity 200ms ease, transform 240ms cubic-bezier(.2,.8,.2,1), visibility 200ms ease; }
+.gl-modal { position: fixed; z-index: 89; top: 50%; left: 50%; width: min(960px, calc(100vw - 40px)); height: min(660px, calc(100vh - 56px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-bright); border-radius: 20px; background: var(--panel-strong); -webkit-backdrop-filter: blur(22px); backdrop-filter: blur(22px); box-shadow: var(--shadow); opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, -47%) scale(.985); transition: opacity 200ms ease, transform 240ms cubic-bezier(.2,.8,.2,1), visibility 200ms ease; }
 .gl-modal.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, -50%) scale(1); }
-.gl-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 18px 16px 24px; border-bottom: 1px solid var(--line); }
-.gl-head h2 { margin: 0; font-size: 18px; font-weight: 640; letter-spacing: -.01em; color: var(--ink); }
-.gl-head p { margin: 3px 0 0; max-width: 560px; color: var(--muted); font-size: 12px; line-height: 1.45; }
-.gl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--line); }
-.gl-btn { height: 34px; padding: 0 14px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: rgba(255,255,255,.035); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color 180ms ease, background 180ms ease, color 180ms ease; }
+.gl-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 18px 16px 24px; border-bottom: 1px solid var(--line); }
+.gl-head h2 { margin: 0; font-size: 19px; font-weight: 640; letter-spacing: -.01em; color: var(--ink); }
+.gl-head p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+.gl-ctx { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 24px; border-bottom: 1px solid var(--line); color: var(--faint); font-size: 11.5px; }
+.gl-ctx b { color: var(--muted); font-weight: 600; }
+.gl-ctx-actions { display: flex; align-items: center; gap: 8px; }
+.gl-err { color: var(--coral); font-size: 12px; margin: 10px 24px 0; }
+.gl-btn { height: 34px; padding: 0 14px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: rgba(255,255,255,.035); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color 180ms ease, background 180ms ease; }
 .gl-btn:hover:not(:disabled) { border-color: var(--line-bright); background: rgba(255,255,255,.065); }
-.gl-btn:disabled { opacity: .4; cursor: default; }
+.gl-btn:disabled { opacity: .45; cursor: default; }
 .gl-btn.primary { color: #11151b; background: linear-gradient(145deg, #f7f6f2, #b7c9dd); border: 0; font-weight: 650; }
 .gl-btn.primary:hover:not(:disabled) { background: linear-gradient(145deg, #ffffff, #c4d2e2); }
-.gl-btn.danger { color: var(--coral); border-color: rgba(255,142,122,.28); background: rgba(255,142,122,.06); }
-.gl-btn.danger:hover:not(:disabled) { border-color: rgba(255,142,122,.5); background: rgba(255,142,122,.1); }
-.gl-champ { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; }
-.gl-champ b { color: var(--mint); font-weight: 640; font-variant-numeric: tabular-nums; }
-.gl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(0,1fr); }
-.gl-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; }
-.gl-rail h3 { margin: 14px 8px 5px; color: #6b727f; font-size: 8.5px; font-weight: 680; letter-spacing: .12em; text-transform: uppercase; }
-.gl-rail h3:first-child { margin-top: 2px; }
-.gl-prop { text-align: left; border: 1px solid transparent; border-radius: 11px; background: transparent; color: var(--ink); padding: 9px 11px; cursor: pointer; transition: background .12s ease, color .12s ease, border-color .12s ease; }
-.gl-prop:hover { background: rgba(255,255,255,.03); }
-.gl-prop.is-active { background: rgba(205,208,214,.09); border-color: var(--line-bright); }
-.gl-prop small, .gl-card small { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gl-card { border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.015); padding: 9px 11px; }
-.gl-card strong { display: block; color: var(--ink); font-size: 12px; font-weight: 600; }
-.gl-status { display: inline-block; padding: 1.5px 8px; border-radius: 999px; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
-.gl-status.ready_for_review, .gl-status.promoted, .gl-status.approved { color: #93c9a8; background: rgba(147,201,168,.12); }
-.gl-status.failed, .gl-status.rejected, .gl-status.rolled_back { color: var(--coral); background: rgba(255,142,122,.12); }
-.gl-status.draft, .gl-status.evaluating, .gl-status.pending { color: var(--amber); background: rgba(255,202,112,.12); }
-.gl-detail { overflow-y: auto; padding: 20px 24px 26px; color: var(--muted); font-size: 13px; }
-.gl-detail h4 { margin: 18px 0 8px; color: var(--ink); font-size: 13px; font-weight: 640; letter-spacing: -.005em; }
-.gl-detail h4:first-child { margin-top: 0; }
-.gl-detail p { margin: 0 0 7px; line-height: 1.6; color: #c3c8d0; }
-.gl-detail .muted { color: var(--faint); font-size: 12px; }
-.gl-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
-.gl-table th, .gl-table td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
-.gl-table th { color: #6b727f; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
-.gl-table td { color: #c3c8d0; }
-.gl-up { color: #93c9a8; } .gl-down { color: var(--coral); }
-.gl-gate { display: flex; align-items: center; gap: 9px; padding: 5px 0; font-size: 12px; color: #c3c8d0; }
-.gl-gate i { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
-.gl-gate.pass i { background: #93c9a8; box-shadow: 0 0 8px rgba(147,201,168,.5); }
-.gl-gate.fail i { background: var(--coral); box-shadow: 0 0 8px rgba(255,142,122,.5); }
-.gl-gate small { color: var(--faint); }
-.gl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
-.gl-approver { height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.035); color: var(--ink); font: inherit; font-size: 12px; outline: none; transition: border-color 180ms ease; }
-.gl-approver:focus { border-color: var(--line-bright); }
-.gl-approver::placeholder { color: var(--faint); }
-.gl-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; line-height: 1.6; }
-.gl-err { color: var(--coral); font-size: 12px; margin: 10px 24px 0; }
-.gl-live-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11.5px; cursor: pointer; }
-.gl-live-toggle input { width: 14px; height: 14px; accent-color: var(--mint); cursor: pointer; }
-.gl-mini { display: flex; gap: 6px; margin-top: 8px; }
-.gl-mini .gl-btn { height: 28px; padding: 0 11px; font-size: 11px; }
-.gl-flow { display: flex; align-items: center; gap: 0; padding: 11px 24px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.gl-step { display: flex; align-items: center; gap: 7px; padding: 0 12px; white-space: nowrap; }
-.gl-step:not(:first-child)::before { content: ""; width: 16px; height: 1px; background: var(--line-bright); margin-right: 4px; }
-.gl-step-dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3f48; flex: 0 0 auto; }
-.gl-step-label { font-size: 11px; font-weight: 600; color: var(--faint); }
-.gl-step.done .gl-step-dot { background: #93c9a8; }
-.gl-step.done .gl-step-label { color: var(--muted); }
-.gl-step.current .gl-step-dot { background: var(--mint); box-shadow: 0 0 9px rgba(201,204,210,.6); }
-.gl-step.current .gl-step-label { color: var(--ink); }
-.gl-step.fail .gl-step-dot { background: var(--coral); box-shadow: 0 0 9px rgba(255,142,122,.5); }
-.gl-step.fail .gl-step-label { color: var(--coral); }
-.gl-intro { max-width: 520px; }
-.gl-intro h3 { margin: 0 0 8px; color: var(--ink); font-size: 15px; font-weight: 640; }
-.gl-intro > p { margin: 0 0 14px; color: #c3c8d0; font-size: 13px; line-height: 1.6; }
-.gl-note { padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.015); color: var(--muted); font-size: 12px; line-height: 1.55; }
-.gl-note b { color: var(--ink); }
+.gl-btn.ghost { color: var(--muted); }
+.gl-btn.sm { height: 28px; padding: 0 11px; font-size: 11.5px; }
+.gl-link { border: 0; background: transparent; color: var(--faint); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.gl-link:hover { color: var(--muted); }
+.gl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 274px minmax(0,1fr); }
+.gl-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.gl-rail-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 6px 2px; }
+.gl-rail-head h3 { color: #6b727f; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.gl-sugg { text-align: left; border: 1px solid var(--line); border-radius: 12px; background: transparent; color: var(--ink); padding: 11px 12px; cursor: pointer; transition: border-color 140ms ease, background 140ms ease; }
+.gl-sugg:hover { border-color: var(--line-bright); }
+.gl-sugg.on { border-color: var(--line-bright); background: rgba(205,208,214,.07); }
+.gl-sugg strong { display: block; font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.gl-pill { display: inline-block; margin-top: 8px; padding: 2px 8px; border-radius: 999px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.gl-pill.s-ready, .gl-pill.s-applied { color: #93c9a8; background: rgba(147,201,168,.13); }
+.gl-pill.s-testing, .gl-pill.s-todo { color: var(--amber); background: rgba(255,202,112,.13); }
+.gl-pill.s-fail { color: var(--coral); background: rgba(255,142,122,.13); }
+.gl-pill.s-muted { color: var(--faint); background: rgba(255,255,255,.05); }
+.gl-tools { margin-top: 6px; padding: 12px; border: 1px dashed var(--line-bright); border-radius: 12px; }
+.gl-tools h3 { color: #6b727f; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 8px; }
+.gl-tool { display: flex; flex-direction: column; gap: 7px; }
+.gl-tool .name { color: var(--ink); font-size: 12px; font-weight: 600; }
+.gl-tool .desc { color: var(--faint); font-size: 10.5px; line-height: 1.4; margin-top: 2px; }
+.gl-tool .row { display: flex; gap: 6px; }
+.gl-detail { overflow-y: auto; padding: 20px 24px 24px; color: #c3c8d0; font-size: 13px; }
+.gl-detail h4 { color: var(--ink); font-size: 12px; font-weight: 640; margin: 0 0 6px; }
+.gl-detail h4.mt { margin-top: 20px; }
+.gl-detail p { margin: 0; line-height: 1.6; }
+.gl-change { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.015); }
+.gl-change + .gl-change { margin-top: 8px; }
+.gl-change .col { flex: 1; min-width: 0; }
+.gl-change .lbl { color: var(--faint); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.gl-change .val { color: var(--ink); font-size: 12.5px; margin-top: 3px; line-height: 1.4; }
+.gl-change .arrow { color: var(--faint); font-size: 16px; flex: 0 0 auto; }
+.gl-verdict { margin-top: 16px; padding: 12px 14px; border-radius: 12px; font-size: 12.5px; font-weight: 600; }
+.gl-verdict.ok { border: 1px solid rgba(147,201,168,.3); background: rgba(147,201,168,.07); color: #93c9a8; }
+.gl-verdict.no { border: 1px solid rgba(255,142,122,.3); background: rgba(255,142,122,.07); color: var(--coral); }
+.gl-cmp { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+.gl-cmp th, .gl-cmp td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+.gl-cmp th { color: #6b727f; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.gl-cmp td:first-child { color: var(--muted); }
+.gl-cmp td { color: var(--ink); font-variant-numeric: tabular-nums; }
+.gl-up { color: #93c9a8; }
+.gl-checks { margin-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+.gl-check { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: #c3c8d0; }
+.gl-check i { width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center; font-size: 9px; flex: 0 0 auto; font-style: normal; }
+.gl-check.pass i { background: rgba(147,201,168,.15); color: #93c9a8; }
+.gl-check.fail i { background: rgba(255,142,122,.15); color: var(--coral); }
+.gl-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.gl-hint { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13px; text-align: center; padding: 24px; }
+.gl-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px; text-align: center; }
+.gl-empty h3 { color: var(--ink); font-size: 16px; font-weight: 640; }
+.gl-empty p { max-width: 420px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.gl-empty .gl-btn { margin-top: 4px; }
+.gl-empty-tools { margin-top: 20px; width: min(420px, 100%); }
 @media (max-width: 720px) {
-  .gl-modal { width: calc(100vw - 24px); height: min(90vh, calc(100vh - 28px)); }
+  .gl-modal { width: calc(100vw - 24px); height: min(92vh, calc(100vh - 24px)); }
   .gl-body { grid-template-columns: 1fr; }
-  .gl-rail { border-right: 0; border-bottom: 1px solid var(--line); max-height: 200px; }
+  .gl-rail { border-right: 0; border-bottom: 1px solid var(--line); max-height: 220px; }
 }
 `;
-
-function pct(value: number): string {
-  return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
-}
-
-// The self-improvement loop, in plain language, so the panel explains itself.
-const STAGES = [
-  { key: "traces", label: "Traces", hint: "Every run the agent does is recorded as evidence the Lab learns from." },
-  { key: "proposal", label: "Proposal", hint: "The Lab drafts one small, bounded change tied to a recurring problem." },
-  { key: "evaluation", label: "Evaluation", hint: "Run the proposed change against the current setup on the same test tasks." },
-  { key: "gates", label: "Gates", hint: "Automatic safety checks: better quality, no regressions, within budget." },
-  { key: "approval", label: "Approval", hint: "You review and approve. Nothing is promoted on its own." },
-  { key: "live", label: "Live", hint: "Approved changes drive the live agent, and can be rolled back." },
-];
-
-// Where a proposal sits in the loop, so the stepper can highlight it.
-function stageForStatus(status?: string): { index: number; failed: boolean } {
-  switch (status) {
-    case "draft":
-    case "evaluating": return { index: 2, failed: false };
-    case "failed": return { index: 3, failed: true };
-    case "ready_for_review": return { index: 4, failed: false };
-    case "approved":
-    case "promoted": return { index: 5, failed: false };
-    case "rejected": return { index: 4, failed: true };
-    case "rolled_back": return { index: 5, failed: true };
-    default: return { index: -1, failed: false };
-  }
-}
 
 export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaLabProps) {
   const [snapshot, setSnapshot] = useState<LabSnapshot | null>(null);
@@ -163,8 +185,6 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [approver, setApprover] = useState("");
-  const [live, setLive] = useState(false);
   const [abilities, setAbilities] = useState<Ability[]>([]);
 
   const loadSnapshot = useCallback(async () => {
@@ -197,7 +217,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
       const response = await fetch("/api/workspace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, agentId, id, approvedBy: approver || "owner" }),
+        body: JSON.stringify({ action, agentId, id, approvedBy: "owner" }),
       });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? `Request failed (${response.status}).`);
@@ -207,7 +227,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
     } finally {
       setBusy("");
     }
-  }, [agentId, approver, loadAbilities]);
+  }, [agentId, loadAbilities]);
 
   useEffect(() => {
     if (open) { void loadSnapshot(); void loadAbilities(); }
@@ -216,6 +236,11 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
   useEffect(() => {
     if (open && selected) void loadDetail(selected);
   }, [open, selected, loadDetail]);
+
+  // Open straight into the first suggestion so the detail is never blank.
+  useEffect(() => {
+    if (open && !selected && snapshot?.proposals.length) setSelected(snapshot.proposals[0].proposalId);
+  }, [open, selected, snapshot]);
 
   const act = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
     setBusy(action);
@@ -231,10 +256,8 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
       if (action === "generate_proposal" && payload.proposal) setSelected(payload.proposal.proposalId);
       await loadSnapshot();
       if (selected) await loadDetail(selected);
-      return payload;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Request failed.");
-      return undefined;
     } finally {
       setBusy("");
     }
@@ -247,12 +270,32 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  const champion = snapshot?.champion;
-  const policy = champion?.config.workflowPolicy;
+  const proposals = snapshot?.proposals ?? [];
+  const pending = abilities.filter((ability) => ability.status === "pending");
+  const canUndo = Boolean(snapshot?.history.some((record) => record.action === "promote"));
   const proposal = detail?.proposal;
   const report = detail?.evaluation?.report;
-  const pendingAbilities = abilities.filter((ability) => ability.status === "pending");
-  const flow = proposal ? stageForStatus(proposal.status) : { index: -1, failed: false };
+  const anythingToShow = proposals.length > 0;
+
+  const abilityCards = (
+    <div className="gl-tools">
+      <h3>New tools the agent wants to add</h3>
+      {pending.length ? pending.map((ability) => (
+        <div key={ability.id} className="gl-tool">
+          <div>
+            <div className="name">{ability.name.replace(/_/g, " ")}</div>
+            <div className="desc">{ability.description}</div>
+          </div>
+          <div className="row">
+            <button className="gl-btn sm" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", ability.id)}>Approve</button>
+            <button className="gl-btn sm ghost" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>Remove</button>
+          </div>
+        </div>
+      )) : <div className="desc" style={{ color: "var(--faint)", fontSize: "11.5px" }}>None right now.</div>}
+    </div>
+  );
+
+  const failingGate = report?.gates.find((gate) => !gate.passed && gate.name !== "no_contamination");
 
   return (
     <>
@@ -262,157 +305,113 @@ export function GondolaLab({ open, onClose, agentId = "nova-default" }: GondolaL
         <header className="gl-head">
           <div>
             <h2>Gondola Lab</h2>
-            <p>Proposes safe changes to the agent, and promotes them only after you approve.</p>
+            <p>Small improvements to your agent. You decide what goes live.</p>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Close Gondola Lab"><CloseIcon size={20} /></button>
         </header>
 
-        <div className="gl-toolbar">
-          <button className="gl-btn" disabled={Boolean(busy)} title="Create example runs so you can see the Lab work without waiting for real usage." onClick={() => void act("seed_demo")}>Seed demo run</button>
-          <button className="gl-btn primary" disabled={Boolean(busy)} title="Analyze recent traces and draft one safe, bounded change to test." onClick={() => void act("generate_proposal")}>Generate proposal</button>
-          <button className="gl-btn" disabled={Boolean(busy) || !snapshot?.history.some((record) => record.action === "promote")} title="Return the live agent to its previous configuration." onClick={() => void act("rollback", { approvedBy: approver || "user" })}>Rollback champion</button>
-          <span className="gl-champ" title="The configuration the live agent is using right now.">
-            Champion <b>{champion ? champion.versionId.slice(0, 8) : "none"}</b>
-            {policy ? ` · ${policy.conceptCount} concept(s), critic ${policy.useSeparateCritic ? "on" : "off"}, gate ${policy.requireAnalyzeBeforeAnimate ? "on" : "off"}` : ""}
-          </span>
-        </div>
-
-        <div className="gl-flow">
-          {STAGES.map((stage, index) => {
-            const cls = flow.index < 0 ? "" : index < flow.index ? "done" : index === flow.index ? (flow.failed ? "fail" : "current") : "";
-            return (
-              <div key={stage.key} className={`gl-step ${cls}`} title={stage.hint}>
-                <span className="gl-step-dot" /><span className="gl-step-label">{stage.label}</span>
-              </div>
-            );
-          })}
-        </div>
+        {anythingToShow && (
+          <div className="gl-ctx">
+            <span>Currently live: <b>your standard setup</b></span>
+            <div className="gl-ctx-actions">
+              <button className="gl-btn sm" disabled={Boolean(busy)} onClick={() => void act("generate_proposal")}>Check for improvements</button>
+              {canUndo && <button className="gl-btn sm ghost" disabled={Boolean(busy)} onClick={() => void act("rollback", { approvedBy: "owner" })}>Undo last change</button>}
+            </div>
+          </div>
+        )}
 
         {error ? <div className="gl-err">{error}</div> : null}
 
-        <div className="gl-body">
-          <div className="gl-rail">
-            <h3>Proposals</h3>
-            {snapshot?.proposals.length
-              ? snapshot.proposals.map((item) => (
-                <button key={item.proposalId} className={`gl-prop${selected === item.proposalId ? " is-active" : ""}`} onClick={() => setSelected(item.proposalId)}>
-                  <span className={`gl-status ${item.status}`}>{item.status.replace(/_/g, " ")}</span>
-                  <small>{item.observedProblem}</small>
-                </button>
-              ))
-              : <p className="muted" style={{ margin: "4px 8px" }}>No proposals yet. Seed a run, then generate one.</p>}
-
-            <h3>Pending abilities</h3>
-            {pendingAbilities.length
-              ? pendingAbilities.map((ability) => (
-                <div key={ability.id} className="gl-card">
-                  <strong>{ability.name}</strong>
-                  <small>{ability.description}</small>
-                  <div className="gl-mini">
-                    <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void actAbility("approve_ability", ability.id)}>Approve</button>
-                    <button className="gl-btn danger" disabled={Boolean(busy)} onClick={() => void actAbility("delete_ability", ability.id)}>Reject</button>
-                  </div>
-                </div>
-              ))
-              : <p className="muted" style={{ margin: "4px 8px" }}>No abilities awaiting approval.</p>}
-
-            <h3>Recent traces</h3>
-            {snapshot?.traces.slice(0, 6).map((trace) => (
-              <div key={trace.runId} className="gl-card">
-                <strong style={{ fontWeight: 500, fontSize: "11px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{trace.goal.slice(0, 60)}</strong>
-                <small>q {trace.quality.toFixed(1)} · ${trace.costUsd.toFixed(2)} · {trace.humanInterventions} interventions · {trace.deterministicPassed ? "checks pass" : "checks fail"}</small>
-              </div>
-            ))}
+        {!anythingToShow ? (
+          <div className="gl-empty">
+            <h3>Nothing to review yet</h3>
+            <p>As Gondola works, it looks for small ways to improve, like fixing a step it keeps getting wrong. When it finds one, it shows up here for you to approve. Nothing changes on its own.</p>
+            <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("generate_proposal")}>Check for improvements</button>
+            <button className="gl-link" disabled={Boolean(busy)} onClick={() => void act("seed_demo")}>Just exploring? Try it with a demo</button>
+            {pending.length ? <div className="gl-empty-tools">{abilityCards}</div> : null}
           </div>
+        ) : (
+          <div className="gl-body">
+            <div className="gl-rail">
+              <div className="gl-rail-head"><h3>Suggested improvements</h3></div>
+              {proposals.map((item) => {
+                const status = STATUS[item.status] ?? { text: item.status, cls: "s-muted" };
+                return (
+                  <button key={item.proposalId} className={`gl-sugg${selected === item.proposalId ? " on" : ""}`} onClick={() => setSelected(item.proposalId)}>
+                    <strong>{titleForPatch(item.configPatch)}</strong>
+                    <span className={`gl-pill ${status.cls}`}>{status.text}</span>
+                  </button>
+                );
+              })}
+              {abilityCards}
+            </div>
 
-          <div className="gl-detail">
-            {!proposal ? (
-              snapshot?.proposals.length ? (
-                <div className="gl-empty">Select a proposal to see its evaluation.</div>
+            <div className="gl-detail">
+              {!proposal ? (
+                <div className="gl-hint">Pick a suggestion on the left to see what it does.</div>
               ) : (
-                <div className="gl-intro">
-                  <h3>Improve the agent, safely</h3>
-                  <p>The steps above are the loop: Gondola studies real runs, proposes one small change, tests it against the current setup, and promotes it only after you approve.</p>
-                  <div className="gl-note">Start with <b>Seed demo run</b>, then <b>Generate proposal</b>.</div>
-                </div>
-              )
-            ) : (
-              <>
-                <h4>Observed problem</h4>
-                <p>{proposal.observedProblem}</p>
-                <h4>Hypothesis</h4>
-                <p className="muted">{proposal.hypothesis}</p>
-                <p className="muted">Evidence: {proposal.traceEvidence.length} trace(s) · target {proposal.targetMetric} · risk {proposal.riskLevel}</p>
+                <>
+                  <h4>What Gondola noticed</h4>
+                  <p>{proposal.observedProblem}</p>
 
-                <h4>Configuration diff</h4>
-                {detail?.diff.length ? (
-                  <table className="gl-table">
-                    <thead><tr><th>Field</th><th>Champion</th><th>Challenger</th></tr></thead>
-                    <tbody>
-                      {detail.diff.map((change) => (
-                        <tr key={change.field}><td>{change.field}</td><td>{String(change.from)}</td><td>{String(change.to)}</td></tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : <p className="muted">No field changes.</p>}
+                  <h4 className="mt">What it would change</h4>
+                  {detail?.diff.length ? detail.diff.map((change) => {
+                    const human = humanizeChange(change.field, change.from, change.to);
+                    return (
+                      <div key={change.field} className="gl-change">
+                        <div className="col"><div className="lbl">Now</div><div className="val">{human.now}</div></div>
+                        <div className="arrow">&rarr;</div>
+                        <div className="col"><div className="lbl">Suggested</div><div className="val">{human.suggested}</div></div>
+                      </div>
+                    );
+                  }) : <p className="gl-hint" style={{ display: "block", textAlign: "left", padding: 0 }}>No visible change.</p>}
 
-                {proposal.status === "draft" && (
-                  <div className="gl-actions">
-                    <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>{live ? "Run live evaluation" : "Run evaluation"}</button>
-                    <label className="gl-live-toggle"><input type="checkbox" checked={live} onChange={(event) => setLive(event.target.checked)} /> Run live (real inference, spends budget)</label>
-                  </div>
-                )}
-
-                {report ? (
-                  <>
-                    <h4>Champion vs challenger</h4>
-                    <table className="gl-table">
-                      <thead><tr><th>Metric</th><th>Champion</th><th>Challenger</th><th>Δ</th></tr></thead>
-                      <tbody>
-                        <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td>{report.challengerQuality.toFixed(1)}</td><td className={report.qualityDeltaPct >= 0 ? "gl-up" : "gl-down"}>{pct(report.qualityDeltaPct)}</td></tr>
-                        <tr><td>Cost (total)</td><td>${report.championCost.toFixed(2)}</td><td>${report.challengerCost.toFixed(2)}</td><td className={report.costDeltaPct <= 0 ? "gl-up" : "gl-down"}>{pct(report.costDeltaPct)}</td></tr>
-                        <tr><td>Latency (avg ms)</td><td>{report.championLatencyMs}</td><td>{report.challengerLatencyMs}</td><td /></tr>
-                        <tr><td>Human interventions</td><td>{report.championInterventions}</td><td>{report.challengerInterventions}</td><td /></tr>
-                      </tbody>
-                    </table>
-
-                    <h4>Gates</h4>
-                    {report.gates.map((gate) => (
-                      <div key={gate.name} className={`gl-gate ${gate.passed ? "pass" : "fail"}`}><i />{gate.name.replace(/_/g, " ")} <small>{gate.detail}</small></div>
-                    ))}
-
-                    <h4>Per-case results</h4>
-                    <table className="gl-table">
-                      <thead><tr><th>Case</th><th>Kind</th><th>Champ q</th><th>Chall q</th><th>Champ checks</th><th>Chall checks</th></tr></thead>
-                      <tbody>
-                        {detail?.evaluation?.cases.map((comparison) => (
-                          <tr key={comparison.caseId}>
-                            <td>{comparison.caseId}</td>
-                            <td>{comparison.kind}</td>
-                            <td>{comparison.champion.semanticScore.toFixed(1)}</td>
-                            <td>{comparison.challenger.semanticScore.toFixed(1)}</td>
-                            <td className={comparison.champion.deterministic.passed ? "gl-up" : "gl-down"}>{comparison.champion.deterministic.passed ? "pass" : "fail"}</td>
-                            <td className={comparison.challenger.deterministic.passed ? "gl-up" : "gl-down"}>{comparison.challenger.deterministic.passed ? "pass" : "fail"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {report.replayRegressions.length ? <p className="gl-down">Replay regressions: {report.replayRegressions.join(", ")}</p> : null}
-
+                  {proposal.status === "draft" && (
                     <div className="gl-actions">
-                      <input className="gl-approver" placeholder="Your name (approver)" value={approver} onChange={(event) => setApprover(event.target.value)} />
-                      <button className="gl-btn primary" disabled={Boolean(busy) || proposal.status !== "ready_for_review" || !approver.trim()} onClick={() => void act("promote", { proposalId: proposal.proposalId, approvedBy: approver })}>
-                        {proposal.status === "promoted" ? "Promoted" : "Approve & promote"}
-                      </button>
-                      <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
-                      {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only a proposal that passes all gates can be promoted.</span> : null}
+                      <button className="gl-btn primary" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId })}>Test this improvement</button>
                     </div>
-                  </>
-                ) : null}
-              </>
-            )}
+                  )}
+
+                  {report ? (
+                    <>
+                      <div className={`gl-verdict ${report.readyForReview ? "ok" : "no"}`}>
+                        {report.readyForReview
+                          ? "\u2713 Tested and passed every safety check. Ready to apply."
+                          : `Tested \u2014 didn't pass: ${failingGate ? (GATE_FAILS[failingGate.name] ?? "a safety check failed") : "a safety check failed"}.`}
+                      </div>
+
+                      <h4 className="mt">How the suggested version did</h4>
+                      <table className="gl-cmp">
+                        <thead><tr><th>&nbsp;</th><th>Now</th><th>Suggested</th></tr></thead>
+                        <tbody>
+                          <tr><td>Quality</td><td>{report.championQuality.toFixed(1)}</td><td className={report.challengerQuality > report.championQuality ? "gl-up" : ""}>{report.challengerQuality.toFixed(1)}</td></tr>
+                          <tr><td>Cost per run</td><td>${report.championCost.toFixed(2)}</td><td className={report.challengerCost <= report.championCost ? "gl-up" : ""}>${report.challengerCost.toFixed(2)}</td></tr>
+                          <tr><td>Times it needed your help</td><td>{report.championInterventions}</td><td className={report.challengerInterventions < report.championInterventions ? "gl-up" : ""}>{report.challengerInterventions}</td></tr>
+                        </tbody>
+                      </table>
+
+                      <h4 className="mt">Safety checks</h4>
+                      <div className="gl-checks">
+                        {report.gates.filter((gate) => gate.name !== "no_contamination").map((gate) => (
+                          <div key={gate.name} className={`gl-check ${gate.passed ? "pass" : "fail"}`}>
+                            <i>{gate.passed ? "\u2713" : "\u2715"}</i>{GATE_LABELS[gate.name] ?? gate.name.replace(/_/g, " ")}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="gl-actions">
+                        <button className="gl-btn primary" disabled={Boolean(busy) || proposal.status !== "ready_for_review"} onClick={() => void act("promote", { proposalId: proposal.proposalId, approvedBy: "owner" })}>
+                          {proposal.status === "promoted" ? "Applied" : "Apply this change"}
+                        </button>
+                        <button className="gl-btn ghost" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Dismiss</button>
+                      </div>
+                    </>
+                  ) : null}
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </section>
     </>
   );
