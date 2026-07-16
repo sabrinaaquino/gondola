@@ -139,16 +139,26 @@ export function ModelPicker({
     };
   }, [effortOpen, open]);
 
-  const select = (id: string) => {
+  // Swap the active model, keeping the reasoning effort valid for the new choice.
+  const applyModel = (id: string) => {
     const next = models.find((model) => model.id === id);
     const nextEfforts = supportedReasoningEfforts(next);
     if (nextEfforts.length && !nextEfforts.includes(reasoningEffort)) {
       onReasoningEffortChange?.(nextEfforts.includes("medium") ? "medium" : nextEfforts[0]);
     }
     onChange(id);
+  };
+
+  const select = (id: string) => {
+    applyModel(id);
     setOpen(false);
     setEffortOpen(false);
     setQuery("");
+  };
+
+  // Toggle Fast mode without closing the dropdown (used by the dropdown switch).
+  const toggleFast = () => {
+    if (fastPair) applyModel(fastActive ? fastPair.base.id : fastPair.fast.id);
   };
 
   const renderRow = (model: CatalogModel) => {
@@ -192,7 +202,7 @@ export function ModelPicker({
             aria-expanded={open}
             title={`Conversation model: ${currentName}`}
           >
-            {fastActive ? <BoltIcon size={14} /> : <span className="composer-model-glyph" aria-hidden="true">◈</span>}
+            <span className="composer-model-glyph" aria-hidden="true">◈</span>
             <span>{displayName}</span>
           </button>
           {reasoningOptions.length > 0 && effectiveEffort && (
@@ -208,14 +218,14 @@ export function ModelPicker({
               {EFFORT_LABELS[effectiveEffort]}
             </button>
           )}
-          {fastPair && (
+          {fastPair && fastActive && (
             <button
               type="button"
-              className={`composer-model-fast ${fastActive ? "is-active" : ""}`}
-              onClick={() => select(fastActive ? fastPair.base.id : fastPair.fast.id)}
+              className="composer-model-fast is-active"
+              onClick={toggleFast}
               disabled={disabled}
-              aria-pressed={fastActive}
-              title={fastActive ? "Turn off Fast mode" : "Use Fast mode"}
+              aria-pressed={true}
+              title="Fast mode on — click to turn off"
             >
               <BoltIcon size={12} /><span>Fast</span>
             </button>
@@ -264,6 +274,24 @@ export function ModelPicker({
               <button type="button" className="model-picker-clear" onClick={() => setQuery("")} aria-label="Clear search">×</button>
             )}
           </div>
+
+          {fastPair && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={fastActive}
+              className={`model-picker-fast ${fastActive ? "is-active" : ""}`}
+              onClick={toggleFast}
+              disabled={disabled}
+            >
+              <BoltIcon size={14} />
+              <span className="model-picker-fast-text">
+                <strong>Fast mode</strong>
+                <small>Lower latency, same model</small>
+              </span>
+              <span className="model-picker-fast-switch" aria-hidden="true"><i /></span>
+            </button>
+          )}
 
           <div className="model-picker-list" role="listbox">
             {filtered ? (
