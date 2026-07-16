@@ -23,6 +23,18 @@ export function resolveRoutedModel(config: LabConfig | undefined, role: string):
   return model || undefined;
 }
 
+/**
+ * The model a champion routes the live *chat* to. Unlike resolveRoutedModel, this
+ * requires an explicit "chat" rule and never falls back to the config's generic
+ * default model: that default is a creative-workflow default, not the user's chat
+ * preference, so it must never silently override the model picker.
+ */
+export function resolveChatRouteModel(config: LabConfig | undefined): string | undefined {
+  const rule = config?.routing?.rules?.find((candidate) => candidate.role === "chat");
+  const model = (rule?.model ?? "").trim();
+  return model || undefined;
+}
+
 /** The current champion config (version id + config), or undefined when none is promoted. */
 export async function getChampionConfig(): Promise<{ versionId: string; config: LabConfig } | undefined> {
   const champion = await getChampion().catch(() => undefined);

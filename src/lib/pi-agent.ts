@@ -53,7 +53,7 @@ import { enqueueRun } from "./run-queue";
 import { MAX_SUBAGENT_DEPTH, runSubAgent } from "./subagent";
 import { recordExperience } from "./skill-distiller";
 import { recordLiveTrace } from "./lab/ingest";
-import { getChampionConfig, resolveRoutedModel } from "./lab/apply";
+import { getChampionConfig, resolveChatRouteModel } from "./lab/apply";
 import type { TraceRouting } from "./lab/types";
 import { routeModelLive, type RoutingResult } from "./model-registry";
 import {
@@ -1304,13 +1304,14 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
       prefer: "balanced",
     }, input.signal)
     : Promise.resolve(undefined);
-  // Phase 4: a promoted (champion) Lab config drives the live runtime. On the
-  // standard text path, the champion's chat route (if any) is tried first, with
-  // the user's model preserved as a fallback. No champion means no change.
+  // Phase 4: a promoted (champion) Lab config can steer routing, but only via an
+  // explicit "chat" rule, and only as a fallback AFTER the user's selected model.
+  // The model picker always wins; a champion's generic default model never
+  // silently overrides it. No champion (or no chat rule) means no change.
   const champion = (!input.hidden && !input.voiceMode && !hasVisionInput)
     ? await getChampionConfig().catch(() => undefined)
     : undefined;
-  const championModel = resolveRoutedModel(champion?.config, "chat");
+  const championModel = resolveChatRouteModel(champion?.config);
   // Surface reasoning only when the selected model advertises it. Voice turns
   // need low latency, hidden turns are silent, and vision uses a separate model.
   session.runtime.showThinking = !input.voiceMode
@@ -1363,8 +1364,8 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
         REALTIME_MULTIMODAL_FALLBACK,
       ])].slice(0, 3)
       : [...new Set([
-        ...(championModel ? [championModel] : []),
         settings.chatModel,
+        ...(championModel ? [championModel] : []),
         SMART_FAST_CHAT_MODEL,
         REALTIME_MULTIMODAL_MODEL,
       ])].slice(0, 3);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveRoutedModel } from "./apply";
+import { resolveChatRouteModel, resolveRoutedModel } from "./apply";
 import type { LabConfig } from "./types";
 
 function config(routing: LabConfig["routing"]): LabConfig {
@@ -33,4 +33,14 @@ test("resolveRoutedModel prefers a matching role rule, then the default", () => 
 test("resolveRoutedModel returns undefined when nothing routes", () => {
   const cfg = config({ defaultModel: "  ", rules: [] });
   assert.equal(resolveRoutedModel(cfg, "chat"), undefined);
+});
+
+test("resolveChatRouteModel never uses the generic default (never overrides the model picker)", () => {
+  // A champion with a default but no explicit chat rule must NOT steer live chat.
+  const naive = config({ defaultModel: "zai-org-glm-5-2", rules: [{ role: "creator", model: "zai-org-glm-5-2" }] });
+  assert.equal(resolveChatRouteModel(naive), undefined);
+  assert.equal(resolveChatRouteModel(undefined), undefined);
+  // Only an explicit chat rule steers chat (still just a fallback in pi-agent).
+  const explicit = config({ defaultModel: "zai-org-glm-5-2", rules: [{ role: "chat", model: "some-chat-model" }] });
+  assert.equal(resolveChatRouteModel(explicit), "some-chat-model");
 });
