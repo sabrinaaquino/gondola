@@ -193,6 +193,9 @@ export async function buildRuntimeSnapshot(input: RuntimeSnapshotInput): Promise
       prompt: task.prompt,
       assetId: task.assetId,
       costUsd: jobCost(task) || undefined,
+      goal: task.goal,
+      sourceAssetIds: task.sourceAssetIds,
+      retrievalAttempts: task.retrievalAttempts,
     })),
     assets: assets.map((asset) => ({
       id: asset.id,

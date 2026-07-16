@@ -52,6 +52,7 @@ import {
   getMediaTask,
   getMediaTaskByProviderId,
   listMediaTasks,
+  resumePendingMediaTasks,
   toTaskStatusView,
 } from "./media-tasks";
 import { buildRuntimeSnapshot } from "./runtime-snapshot";
@@ -64,6 +65,7 @@ import {
 } from "./runtime-state";
 import {
   addExecutionCheckpoint,
+  getExecutionState,
   setExecutionPlan,
   STEP_STATUSES,
   updateExecutionStep,
@@ -191,13 +193,21 @@ const RESERVED_TOOL_NAMES = [
 // what lets the agent (not only the browser) list, await, and deliver a job it
 // started -- including jobs queued by a worker or via the raw API. Returns the
 // task id so the tool result can carry it back for a later media_task_await.
-async function recordMediaTaskFromDetails(details: Record<string, unknown>): Promise<string | undefined> {
+async function recordMediaTaskFromDetails(
+  details: Record<string, unknown>,
+  context: { conversationId?: string; sourceAssetIds?: string[] } = {},
+): Promise<string | undefined> {
   if (details.status !== "queued") return undefined;
   const queueId = typeof details.queueId === "string" ? details.queueId : undefined;
   const model = typeof details.model === "string" ? details.model : undefined;
   const kind = details.kind === "video" || details.kind === "music" ? details.kind : undefined;
   if (!queueId || !model || !kind) return undefined;
   try {
+    // Tie the job to its conversation + active goal so it can never become
+    // detached from the agent's runtime state (the failure this hardening fixes).
+    const goal = context.conversationId
+      ? (await getExecutionState(context.conversationId).catch(() => undefined))?.goal ?? undefined
+      : undefined;
     const task = await createMediaTask({
       providerTaskId: queueId,
       kind,
@@ -206,6 +216,9 @@ async function recordMediaTaskFromDetails(details: Record<string, unknown>): Pro
       model,
       downloadUrl: typeof details.downloadUrl === "string" ? details.downloadUrl : undefined,
       estimatedCostUsd: typeof details.quote === "number" ? details.quote : undefined,
+      conversationId: context.conversationId,
+      goal,
+      sourceAssetIds: context.sourceAssetIds,
     });
     return task.id;
   } catch {
@@ -835,7 +848,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
         input.confirmed === true,
         signal,
       );
-      const taskId = await recordMediaTaskFromDetails(details);
+      const taskId = await recordMediaTaskFromDetails(details, { conversationId: runtime.sessionId });
       const videoText = taskId
         ? `Video queued (job ${taskId}). It renders asynchronously and will appear inline in this chat; if it does not, call media_task_await with this taskId to fetch and deliver it. Never curl or save to disk to show a video, and do not claim it is delivered until it renders or media_task_await confirms it.`
         : String(details.message ?? `Video job ${details.status}.`);
@@ -863,7 +876,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
         input.confirmed === true,
         signal,
       );
-      const taskId = await recordMediaTaskFromDetails(details);
+      const taskId = await recordMediaTaskFromDetails(details, { conversationId: runtime.sessionId });
       const musicText = taskId
         ? `Track queued (job ${taskId}). It renders asynchronously and will appear inline in this chat; if it does not, call media_task_await with this taskId to fetch and deliver it. Never curl or save to disk to play it, and do not claim it is delivered until it renders or media_task_await confirms it.`
         : String(details.message ?? `Music job ${details.status}.`);
@@ -1705,6 +1718,10 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   session.runtime.currentMessage = input.message;
   session.runtime.webSearchCompleted = false;
   session.runtime.turnTrace = { startedAt: Date.now(), toolCalls: [] };
+  // Supervisor-safe resume: on every real turn, re-drive any media jobs for this
+  // conversation that were left queued/running (detached after a crash or a turn
+  // that ended early), so a queued job can never orphan from runtime state.
+  if (!input.hidden) void resumePendingMediaTasks({ conversationId: input.sessionId }).catch(() => undefined);
   // Harness benefit: a promoted (champion) Lab config must actually change what
   // the acting agent does. Load it here and fold its workflow policy into the
   // live system prompt (rebuilt every turn), plus a short self-awareness note

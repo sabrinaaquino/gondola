@@ -60,6 +60,9 @@ export interface RuntimeJob {
   assetId?: string;
   etaSeconds?: number;
   costUsd?: number;
+  goal?: string;
+  sourceAssetIds?: string[];
+  retrievalAttempts?: number;
 }
 
 export interface RuntimeAsset {

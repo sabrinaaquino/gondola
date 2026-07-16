@@ -52,6 +52,17 @@ export interface MediaTask {
   originatingRunId?: string;
   originatingAgentId?: string;
   projectId?: string;
+  /** The conversation this job belongs to — ties a queued job to runtime state
+   *  so it can never become detached from the agent that started it. */
+  conversationId?: string;
+  /** The goal/objective that was active when the job was queued. */
+  goal?: string;
+  /** Asset ids used as source material (e.g. an image-to-video reference). */
+  sourceAssetIds?: string[];
+  /** How many times retrieval has polled the provider for this job. */
+  retrievalAttempts?: number;
+  /** ISO timestamp of the most recent retrieval poll. */
+  lastPolledAt?: string;
   /** Wall-clock ms until which the active retrieval owner holds its lease. */
   retrievalLeaseUntil?: number;
 }
@@ -96,6 +107,9 @@ export interface CreateMediaTaskInput {
   originatingRunId?: string;
   originatingAgentId?: string;
   projectId?: string;
+  conversationId?: string;
+  goal?: string;
+  sourceAssetIds?: string[];
 }
 
 export async function createMediaTask(input: CreateMediaTaskInput): Promise<MediaTask> {
@@ -115,6 +129,10 @@ export async function createMediaTask(input: CreateMediaTaskInput): Promise<Medi
     originatingRunId: input.originatingRunId,
     originatingAgentId: input.originatingAgentId,
     projectId: input.projectId,
+    conversationId: input.conversationId,
+    goal: input.goal,
+    sourceAssetIds: input.sourceAssetIds,
+    retrievalAttempts: 0,
   };
   return serial(async () => {
     const store = await read();
@@ -277,7 +295,12 @@ async function runRetrieval(id: string, retrieve: Retriever): Promise<AwaitMedia
     }
     // Claim/refresh the retrieval lease so a stale "running" task left by a crash
     // can be recovered by a later await.
-    await updateMediaTask(id, { status: "running", retrievalLeaseUntil: Date.now() + RETRIEVAL_LEASE_MS });
+    await updateMediaTask(id, {
+      status: "running",
+      retrievalLeaseUntil: Date.now() + RETRIEVAL_LEASE_MS,
+      retrievalAttempts: (current.retrievalAttempts ?? 0) + 1,
+      lastPolledAt: new Date().toISOString(),
+    });
 
     try {
       const outcome = await retrieve({ kind: current.kind, model: current.model, queueId: current.providerTaskId, downloadUrl: current.downloadUrl });
@@ -365,6 +388,36 @@ export async function awaitMediaTask(id: string, options?: AwaitMediaOptions): P
   if (result) return result;
   const snapshot = await getMediaTask(id);
   return { task: snapshot ?? existing, state: "timeout" };
+}
+
+/** Pure selection of tasks eligible for resume (queued/running), scoped + capped. */
+export function selectResumableTasks(
+  tasks: MediaTask[],
+  options?: { conversationId?: string; limit?: number },
+): MediaTask[] {
+  const pending = tasks.filter((task) =>
+    (task.status === "queued" || task.status === "running")
+    && (!options?.conversationId || task.conversationId === options.conversationId));
+  return options?.limit ? pending.slice(0, options.limit) : pending;
+}
+
+/**
+ * Re-drive retrieval for any queued/running media tasks (optionally scoped to a
+ * conversation). Safe to call repeatedly and concurrently: awaitMediaTask shares
+ * one retrieval per task via the in-flight map + lease, so a detached job resumes
+ * exactly once. Fire-and-forget — kicks the shared retrieval and returns the
+ * tasks it resumed. This is the supervisor/turn-start recovery hook that stops a
+ * queued job from becoming orphaned from the agent's runtime state.
+ */
+export async function resumePendingMediaTasks(
+  options?: { conversationId?: string; limit?: number; retrieve?: Retriever },
+): Promise<MediaTask[]> {
+  const store = await read();
+  const resumable = selectResumableTasks(store.tasks, options);
+  for (const task of resumable) {
+    void awaitMediaTask(task.id, { retrieve: options?.retrieve }).catch(() => undefined);
+  }
+  return resumable;
 }
 
 export interface MediaTaskStatusView {
