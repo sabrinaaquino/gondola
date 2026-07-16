@@ -7,9 +7,9 @@
     "nova": "bin/nova.mjs"
   },
   "scripts": {
-    "dev": "next dev --hostname 127.0.0.1",
+    "dev": "next dev --hostname localhost",
     "build": "next build",
-    "start": "next start --hostname 127.0.0.1",
+    "start": "next start --hostname localhost",
     "harness": "node --import tsx src/cli/main.ts",
     "test": "node --import tsx --test src/lib/*.test.ts",
     "typecheck": "tsc --noEmit"
