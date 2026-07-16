@@ -48,3 +48,23 @@ test("recordLiveTrace writes a draft trace the Lab can read back", async () => {
   assert.equal(traces[0].runId, trace.runId);
   assert.equal(traces[0].goal, "make a poster");
 });
+
+test("recordLiveTrace stores the routing recommendation when provided", async () => {
+  process.env.GONDOLA_LAB_ROOT = await mkdtemp(path.join(tmpdir(), "gondola-lab-routing-"));
+
+  const trace = await recordLiveTrace({
+    goal: "summarize this",
+    modelsSelected: ["glm-primary"],
+    modelCosts: [{ model: "glm-primary", costUsd: 0.001 }],
+    toolCalls: [],
+    latencyMs: 100,
+    completed: true,
+    finalOutput: "ok",
+    routing: { selected: "glm-primary", recommended: "cheaper-model", matched: false, prefer: "balanced", explanation: "cheaper-model is cheaper for this task" },
+  });
+
+  assert.ok(trace);
+  assert.equal(trace.routing?.selected, "glm-primary");
+  assert.equal(trace.routing?.recommended, "cheaper-model");
+  assert.equal(trace.routing?.matched, false);
+});

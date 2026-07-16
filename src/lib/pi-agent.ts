@@ -53,6 +53,7 @@ import { enqueueRun } from "./run-queue";
 import { MAX_SUBAGENT_DEPTH, runSubAgent } from "./subagent";
 import { recordExperience } from "./skill-distiller";
 import { recordLiveTrace } from "./lab/ingest";
+import { routeModelLive, type RoutingResult } from "./model-registry";
 import { createUserAgentMessage, retainUnansweredUserMessage } from "./agent-context";
 
 type Emit = (event: Record<string, unknown>) => void;
@@ -195,6 +196,13 @@ function frameToImage(frameDataUrl?: string): ImageContent | undefined {
   const match = frameDataUrl?.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
   if (!match) return undefined;
   return { type: "image", mimeType: match[1], data: match[2] };
+}
+
+// Cap how long a trace waits on the shadow router so a cold/slow model registry
+// can never delay a turn (the trace itself is written in the background).
+function raceRouting(pending: Promise<RoutingResult | undefined>): Promise<RoutingResult | undefined> {
+  const timeout = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1_500));
+  return Promise.race([pending, timeout]).catch(() => undefined);
 }
 
 const EMPTY_USAGE = {
@@ -1126,6 +1134,21 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   const frame = frameToImage(input.frameDataUrl);
   const images = [...attachmentImages, ...(frame ? [frame] : [])];
   const hasVisionInput = images.length > 0;
+  // Phase 2: run an explainable routing recommendation for the standard text
+  // path, concurrently with the turn, only to record it in the trace (observe
+  // mode). It never blocks the turn and never overrides the chosen model; the
+  // outer loop can later use these recommendation-vs-actual records to decide
+  // whether routing should become authoritative.
+  const routingPromise: Promise<RoutingResult | undefined> = (!input.hidden && !input.voiceMode && !hasVisionInput)
+    ? routeModelLive({
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      needsTools: true,
+      needsReasoning: settings.chatModelSupportsReasoning,
+      taskHint: input.message,
+      prefer: "balanced",
+    }, input.signal)
+    : Promise.resolve(undefined);
   // Surface reasoning only when the selected model advertises it. Voice turns
   // need low latency, hidden turns are silent, and vision uses a separate model.
   session.runtime.showThinking = !input.voiceMode
@@ -1256,15 +1279,24 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
             message.role === "assistant" && message.stopReason !== "error"
               ? [{ model: message.model ?? model, costUsd: message.usage?.cost?.total ?? 0 }]
               : []);
-          void recordLiveTrace({
-            goal: input.message,
-            modelsSelected: [model],
-            modelCosts,
-            toolCalls: session.runtime.turnTrace?.toolCalls ?? [],
-            latencyMs: Date.now() - (session.runtime.turnTrace?.startedAt ?? Date.now()),
-            completed: true,
-            finalOutput: assistantText ?? "",
-          }).catch(() => undefined);
+          const finishedAt = Date.now();
+          const startedAt = session.runtime.turnTrace?.startedAt ?? finishedAt;
+          const collectedTools = session.runtime.turnTrace?.toolCalls ?? [];
+          void (async () => {
+            const routing = await raceRouting(routingPromise);
+            await recordLiveTrace({
+              goal: input.message,
+              modelsSelected: [model],
+              modelCosts,
+              toolCalls: collectedTools,
+              latencyMs: finishedAt - startedAt,
+              completed: true,
+              finalOutput: assistantText ?? "",
+              routing: routing?.model
+                ? { selected: model, recommended: routing.model, matched: routing.model === model, prefer: "balanced", explanation: routing.explanation }
+                : undefined,
+            });
+          })().catch(() => undefined);
         }
         return;
       }
@@ -1302,15 +1334,25 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
     await saveTranscript(input.sessionId, session.agent.state.messages).catch(() => undefined);
     // Record the failed turn too: repeated failures are exactly what the Lab's
     // outer loop needs to see to propose a fix.
-    void recordLiveTrace({
-      goal: input.message,
-      modelsSelected: candidates,
-      modelCosts: [],
-      toolCalls: session.runtime.turnTrace?.toolCalls ?? [],
-      latencyMs: Date.now() - (session.runtime.turnTrace?.startedAt ?? Date.now()),
-      completed: false,
-      finalOutput: lastError,
-    }).catch(() => undefined);
+    const failedAt = Date.now();
+    const failStartedAt = session.runtime.turnTrace?.startedAt ?? failedAt;
+    const failTools = session.runtime.turnTrace?.toolCalls ?? [];
+    const failSelected = candidates[0] ?? settings.chatModel;
+    void (async () => {
+      const routing = await raceRouting(routingPromise);
+      await recordLiveTrace({
+        goal: input.message,
+        modelsSelected: candidates,
+        modelCosts: [],
+        toolCalls: failTools,
+        latencyMs: failedAt - failStartedAt,
+        completed: false,
+        finalOutput: lastError,
+        routing: routing?.model
+          ? { selected: failSelected, recommended: routing.model, matched: routing.model === failSelected, prefer: "balanced", explanation: routing.explanation }
+          : undefined,
+      });
+    })().catch(() => undefined);
   }
   throw new Error(`Venice is temporarily unavailable after trying compatible fallbacks. ${lastError}`);
 }
