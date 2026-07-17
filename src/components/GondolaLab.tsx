@@ -329,16 +329,34 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
     }
   }, [loadSnapshot, loadDetail, selected]);
 
+  // Generate (if there's something new) and immediately run the checks, so one
+  // click produces a visible result instead of a silently-drafted proposal.
+  const runChecks = useCallback(async (proposalId: string) => {
+    setTab("experiments");
+    setSelected(proposalId);
+    await act("evaluate_proposal", { proposalId, live });
+  }, [act, live]);
+
   const lookForImprovements = useCallback(async () => {
     const payload = await act("generate_proposal");
     if (!payload) return;
     if (payload.proposal) {
-      setTab("experiments");
-      setSelected(payload.proposal.proposalId);
-    } else {
-      setNotice(`Nothing new to test right now. Every pattern the Lab has seen is already being tested or does not have enough evidence yet. Let ${entityName} run more tasks and check back.`);
+      await runChecks(payload.proposal.proposalId);
+      return;
     }
-  }, [act, entityName]);
+    // Nothing new to propose. Still make the click useful: if an experiment is
+    // drafted but its checks never ran, run them; if one is ready, jump to it.
+    const pending = snapshot?.proposals.find((item) => item.status === "draft" || item.status === "evaluating");
+    if (pending) { await runChecks(pending.proposalId); return; }
+    const ready = snapshot?.proposals.find((item) => item.status === "ready_for_review");
+    if (ready) {
+      setTab("experiments");
+      setSelected(ready.proposalId);
+      setNotice("No new patterns right now. Your existing experiment is ready for review below.");
+      return;
+    }
+    setNotice(`No new patterns to test right now. ${entityName} needs to run more tasks (or flag a problem) before there is something to improve.`);
+  }, [act, runChecks, snapshot, entityName]);
 
   useEffect(() => {
     if (!open) return;
@@ -559,6 +577,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
                             {proposal.status === "promoted" ? "Adopted" : "Adopt this change"}
                           </button>
                           <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
+                          {proposal.status !== "promoted" ? <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>Run checks again</button> : null}
                           {proposal.status === "ready_for_review" && proposal.autonomyTier === "auto" ? <span className="muted">Safe enough to adopt on its own when autopilot is on (deterministic, held-out, low-risk).</span> : null}
                           {proposal.autonomyTier === "protected" ? <span className="muted">This kind of change always needs you.</span> : null}
                           {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only an experiment that passes every check can be adopted.</span> : null}
