@@ -48,6 +48,8 @@ export interface SessionRecord {
   createdAt: string;
   /** Optional stable id so the client and the stored message share an identity. */
   id?: string;
+  /** Media produced this turn, persisted on the message so it survives reloads. */
+  media?: import("./app-types").PersistedMedia[];
 }
 
 const ROOT = path.join(process.cwd(), ".gondola");
@@ -667,6 +669,7 @@ export async function appendSessionRecord(record: SessionRecord): Promise<void> 
     role: record.role,
     text: record.text,
     createdAt,
+    ...(record.media?.length ? { media: record.media } : {}),
   }).catch(() => undefined);
   if (summary) {
     // Feed the FTS5 cross-session recall index (best-effort).

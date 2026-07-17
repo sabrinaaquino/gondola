@@ -252,7 +252,29 @@ function conversationMessages(messages: WorkspaceMessage[]): ChatMessage[] {
     role: message.role,
     text: message.text,
     createdAt: message.createdAt,
+    ...(message.media?.length ? { mediaIds: message.media.map((item) => item.id) } : {}),
   }));
+}
+
+// Rebuild renderable media artifacts from the persisted per-message media, so
+// generated images and videos survive a reload or a chat switch instead of
+// vanishing (they used to live only in ephemeral client state).
+function persistedArtifacts(messages: WorkspaceMessage[]): MediaArtifact[] {
+  const artifacts: MediaArtifact[] = [];
+  for (const message of messages) {
+    for (const media of message.media ?? []) {
+      if (!media.url) continue;
+      artifacts.push({
+        id: media.id,
+        kind: media.kind,
+        title: media.kind === "image" ? "Image" : media.kind === "video" ? "Video" : "Audio",
+        prompt: media.prompt ?? "",
+        status: "ready",
+        url: media.url,
+      });
+    }
+  }
+  return artifacts;
 }
 
 function isInternalMediaConfirmation(text: string): boolean {
@@ -404,6 +426,16 @@ function toolStatus(name: string | undefined, agentName: string): string {
     case "generate_image": return "Painting with Venice";
     case "generate_video": return "Starting a Venice video";
     case "generate_music": return "Composing with Venice";
+    case "generate_narration": return "Recording the narration";
+    case "compose_media": return "Composing the final video";
+    case "verify_media": return "Verifying the video";
+    case "media_task_await": return "Waiting for media to finish rendering";
+    case "media_task_list": return "Checking on media jobs";
+    case "delegate_task": return "Delegating to a sub-agent";
+    case "orchestrate": return "Coordinating sub-agents";
+    case "run_command": return "Running a command";
+    case "write_file": return "Writing a file";
+    case "edit_file": return "Editing a file";
     default: return name?.startsWith("mcp_") ? "Using an assigned MCP tool" : "Using a Venice capability";
   }
 }
@@ -886,7 +918,9 @@ function Workspace() {
         .filter((item) => item.conversationId === payload.conversation.id)
         .map(queuedChatMessage),
     ]);
-    setArtifacts([]);
+    // Rehydrate media from the persisted messages so images/videos generated
+    // earlier still render after a reload or chat switch.
+    setArtifacts(persistedArtifacts(payload.messages));
     setAction("neutral");
     setPresenceDirective(DEFAULT_PRESENCE);
     setVisual(undefined);
@@ -2324,6 +2358,16 @@ function Workspace() {
             // A single malformed NDJSON line should not abort the whole turn.
             continue;
           }
+          if (event.type === "tool_end" && event.details?.kind && ["image", "video", "music"].includes(String(event.details.kind))) {
+            console.log("[MEDIA_DEBUG] stream tool_end", {
+              kind: event.details.kind,
+              status: event.details.status,
+              hasUrl: Boolean(event.details.url),
+              urlLength: event.details.url ? String(event.details.url).length : 0,
+              isError: event.isError,
+              detailsKeys: Object.keys(event.details ?? {}),
+            });
+          }
           if (event.type === "text_delta" && event.delta) {
             if (!firstDeltaReceived) {
               firstDeltaReceived = true;
@@ -2406,7 +2450,8 @@ function Workspace() {
                 queueSpeech(narration, "warm", true);
               }
             }
-            ui(() => setMessages((current) => current.map((item) => item.id === assistantId && !item.text
+            liveStatusText = event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…`;
+            ui(() => setMessages((current) => current.map((item) => item.id === assistantId
               ? { ...item, statusText: event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…` }
               : item)));
             syncLive();
@@ -3738,6 +3783,12 @@ function Workspace() {
                     if (!displayText && !(message.role === "assistant" && !message.thinkingStreaming)) return null;
                     return <MessageText text={displayText || message.statusText || `${agentName} is thinking…`} />;
                   })()}
+                  {message.role === "assistant" && message.streaming && stripInlinedAttachments(message.text) ? (
+                    <div className="message-working" aria-live="polite">
+                      <span className="tool-spinner" />
+                      <span>{message.statusText ?? `${agentName} is working…`}</span>
+                    </div>
+                  ) : null}
                   {message.role === "assistant" && message.recovered ? (
                     <div style={{ fontSize: "0.72rem", opacity: 0.6, marginTop: "0.25rem" }}>Recovered after an error</div>
                   ) : null}

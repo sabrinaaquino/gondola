@@ -878,6 +878,28 @@ input:focus-visible {
 .typing-dots i:nth-child(2) { animation-delay: 130ms; }
 .typing-dots i:nth-child(3) { animation-delay: 260ms; }
 
+/* Persistent "working on X" row on a streaming reply, so a turn that is still
+   running (a long tool, a multi-step media build) never looks frozen. */
+.message-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 5px 10px 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: #91a6b8;
+  font-size: 12px;
+  font-style: italic;
+  background: rgba(255, 255, 255, .02);
+}
+.message-working .tool-spinner {
+  width: 13px;
+  height: 13px;
+  border-width: 1px;
+  flex: 0 0 auto;
+}
+
 /* Minimal, borderless reasoning trace in a Cursor and ChatGPT style: a light-grey
    "Thinking" label that shimmers while active, the trace streaming underneath in
    grey with a soft top fade, collapsing to a quiet "Thought for Ns" once done. */

@@ -19,11 +19,21 @@ interface TraceSummary {
   deterministicPassed: boolean;
 }
 
+interface HarnessFlag {
+  id: string;
+  reason: string;
+  count: number;
+  status: "open" | "addressed";
+  proposalDrafted: boolean;
+  lastFlaggedAt: string;
+}
+
 interface LabSnapshot {
   champion: ConfigVersion | null;
   history: PromotionRecord[];
   traces: TraceSummary[];
   proposals: ImprovementProposal[];
+  flags?: HarnessFlag[];
 }
 
 interface ProposalDetail {
@@ -140,6 +150,13 @@ const CSS = `
 .gl-id:hover { color: var(--ink); border-color: var(--line-bright); }
 .gl-tile.attn { border-color: rgba(139,191,157,.4); background: rgba(139,191,157,.05); }
 .gl-loading { display: grid; place-items: center; height: 100%; min-height: 240px; color: var(--faint); font-size: 13px; }
+.gl-flags { display: flex; flex-direction: column; gap: 8px; }
+.gl-flag { display: flex; align-items: flex-start; gap: 10px; }
+.gl-flag-count { flex: 0 0 auto; min-width: 30px; text-align: center; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--faint); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.gl-flag-count.hot { color: var(--coral); border-color: rgba(255,142,122,.35); background: rgba(255,142,122,.08); }
+.gl-flag-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.gl-flag-reason { color: var(--ink); font-size: 12.5px; }
+.gl-flag-meta { color: var(--faint); font-size: 10.5px; }
 .gl-skel { border-radius: 14px; background: linear-gradient(90deg, rgba(255,255,255,.03), rgba(255,255,255,.07), rgba(255,255,255,.03)); background-size: 200% 100%; animation: gl-shimmer 1.3s ease-in-out infinite; }
 @keyframes gl-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .gl-skel-tile { height: 74px; }
@@ -329,16 +346,34 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
     }
   }, [loadSnapshot, loadDetail, selected]);
 
+  // Generate (if there's something new) and immediately run the checks, so one
+  // click produces a visible result instead of a silently-drafted proposal.
+  const runChecks = useCallback(async (proposalId: string) => {
+    setTab("experiments");
+    setSelected(proposalId);
+    await act("evaluate_proposal", { proposalId, live });
+  }, [act, live]);
+
   const lookForImprovements = useCallback(async () => {
     const payload = await act("generate_proposal");
     if (!payload) return;
     if (payload.proposal) {
-      setTab("experiments");
-      setSelected(payload.proposal.proposalId);
-    } else {
-      setNotice(`Nothing new to test right now. Every pattern the Lab has seen is already being tested or does not have enough evidence yet. Let ${entityName} run more tasks and check back.`);
+      await runChecks(payload.proposal.proposalId);
+      return;
     }
-  }, [act, entityName]);
+    // Nothing new to propose. Still make the click useful: if an experiment is
+    // drafted but its checks never ran, run them; if one is ready, jump to it.
+    const pending = snapshot?.proposals.find((item) => item.status === "draft" || item.status === "evaluating");
+    if (pending) { await runChecks(pending.proposalId); return; }
+    const ready = snapshot?.proposals.find((item) => item.status === "ready_for_review");
+    if (ready) {
+      setTab("experiments");
+      setSelected(ready.proposalId);
+      setNotice("No new patterns right now. Your existing experiment is ready for review below.");
+      return;
+    }
+    setNotice(`No new patterns to test right now. ${entityName} needs to run more tasks (or flag a problem) before there is something to improve.`);
+  }, [act, runChecks, snapshot, entityName]);
 
   useEffect(() => {
     if (!open) return;
@@ -367,6 +402,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
   const proposals = snapshot?.proposals ?? [];
   const traces = snapshot?.traces ?? [];
   const history = snapshot?.history ?? [];
+  const openFlags = (snapshot?.flags ?? []).filter((flag) => flag.status === "open");
   const pendingAbilities = abilities.filter((ability) => ability.status === "pending");
   const approvedAbilities = abilities.filter((ability) => ability.status === "approved");
   const proposal = detail?.proposal;
@@ -376,7 +412,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
   const adoptedCount = proposals.filter((item) => item.status === "promoted").length;
   const progressCount = proposals.filter((item) => item.status === "draft" || item.status === "evaluating").length;
   const rejectedCount = proposals.filter((item) => item.status === "rejected" || item.status === "failed" || item.status === "rolled_back").length;
-  const nothingYet = proposals.length === 0 && traces.length === 0;
+  const nothingYet = proposals.length === 0 && traces.length === 0 && openFlags.length === 0;
   const canRevert = history.some((record) => record.action === "promote");
   const canUndoRevert = history[history.length - 1]?.action === "rollback";
 
@@ -457,6 +493,24 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
                     <span className="hint">Nothing is ever adopted without your approval.</span>
                   </div>
                 </div>
+
+                {openFlags.length ? (
+                  <div className="gl-card">
+                    <h3>Flagged problems</h3>
+                    <p className="sub">Problems {entityName} has reported, with how many times each has recurred. These stay here until the Lab addresses them.</p>
+                    <div className="gl-flags">
+                      {openFlags.map((flag) => (
+                        <div key={flag.id} className="gl-flag">
+                          <span className={`gl-flag-count${flag.count > 1 ? " hot" : ""}`}>{flag.count}&times;</span>
+                          <div className="gl-flag-body">
+                            <span className="gl-flag-reason">{flag.reason}</span>
+                            <span className="gl-flag-meta">{flag.proposalDrafted ? "a fix was drafted" : "no fix drafted yet"} · last flagged {new Date(flag.lastFlaggedAt).toLocaleString()}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="gl-card">
                   <h3>Current setup</h3>
@@ -559,6 +613,7 @@ export function GondolaLab({ open, onClose, agentId = "nova-default", entityName
                             {proposal.status === "promoted" ? "Adopted" : "Adopt this change"}
                           </button>
                           <button className="gl-btn danger" disabled={Boolean(busy) || ["promoted", "rejected", "rolled_back"].includes(proposal.status)} onClick={() => void act("reject", { proposalId: proposal.proposalId })}>Reject</button>
+                          {proposal.status !== "promoted" ? <button className="gl-btn" disabled={Boolean(busy)} onClick={() => void act("evaluate_proposal", { proposalId: proposal.proposalId, live })}>Run checks again</button> : null}
                           {proposal.status === "ready_for_review" && proposal.autonomyTier === "auto" ? <span className="muted">Safe enough to adopt on its own when autopilot is on (deterministic, held-out, low-risk).</span> : null}
                           {proposal.autonomyTier === "protected" ? <span className="muted">This kind of change always needs you.</span> : null}
                           {proposal.status !== "ready_for_review" && proposal.status !== "promoted" ? <span className="muted">Only an experiment that passes every check can be adopted.</span> : null}

@@ -7,7 +7,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-agent-core";
 import { Type, type ImageContent } from "@earendil-works/pi-ai";
-import type { AgentProfile, AgentSettings, AvatarAction, MemoryKind, PresenceDirective, ReasoningEffort, WorkspaceMessage } from "./app-types";
+import type { AgentProfile, AgentSettings, AvatarAction, MemoryKind, PersistedMedia, PresenceDirective, ReasoningEffort, WorkspaceMessage } from "./app-types";
 import {
   DEFAULT_SETTINGS,
   REALTIME_MULTIMODAL_FALLBACK,
@@ -46,17 +46,24 @@ import {
   quoteAndQueueMusic,
   quoteAndQueueVideo,
   searchWeb,
+  synthesizeSpeech,
 } from "./venice";
 import {
   awaitMediaTask,
   createMediaTask,
   getMediaTask,
   getMediaTaskByProviderId,
+  isPathWithinMediaDir,
   listMediaTasks,
+  MEDIA_DIR,
   resumePendingMediaTasks,
   selectResumableTasks,
   toTaskStatusView,
 } from "./media-tasks";
+import { getAsset, registerAsset } from "./assets";
+import { composeVideo, mediaToolingAvailable, probeMedia, type Orientation } from "./media-ffmpeg";
+import { mkdir, writeFile as fsWriteFile } from "node:fs/promises";
+import nodePath from "node:path";
 import { buildRuntimeSnapshot } from "./runtime-snapshot";
 import {
   renderRuntimeExplain,
@@ -86,6 +93,7 @@ import { recordLiveTrace } from "./lab/ingest";
 import { getChampionConfig, resolveChatRouteModel } from "./lab/apply";
 import { policyPromptBlock } from "./lab/policy";
 import { generateProposal, recentFailureSummary } from "./lab/service";
+import { recordFlag } from "./lab/flags";
 import { runSupervisorRecovery } from "./supervisor";
 import type { TraceRouting } from "./lab/types";
 import { loadModelRegistry, modelsByKind, resolveChatModelRequest, routeModelLive, type ModelCapability, type ModelKind, type RoutingResult } from "./model-registry";
@@ -125,6 +133,8 @@ interface RuntimeContext {
   memoryScope: MemoryScope;
   /** Per-turn collector for the Lab trace bridge: tool outcomes + start time. */
   turnTrace?: { startedAt: number; toolCalls: { tool: string; ok: boolean; error?: string }[] };
+  /** Media produced this turn (asset-backed), persisted on the assistant message. */
+  producedMedia?: PersistedMedia[];
   /** Approved self-authored abilities to materialize for this session (never pending ones). */
   customToolDefs?: CustomToolDef[];
   /** The live toolset (names + labels) for this session's runtime capability registry. */
@@ -179,7 +189,7 @@ globalSessions.__veniceAlienSessions = sessions;
 // (sessions live on globalThis and survive hot-reloads). Add self-capability and
 // discovery tools here when you introduce them, or they won't appear until a
 // full restart.
-const REQUIRED_BUILT_IN_TOOLS = ["search_web", "inspect_camera", "memory", "search_memory", "rewrite_self", "set_model", "list_models", "propose_harness_change", "venice_api", "venice_reference", "media_task_list", "media_task_await", "runtime_status", "runtime_explain", "set_plan", "update_step", "checkpoint"];
+const REQUIRED_BUILT_IN_TOOLS = ["search_web", "inspect_camera", "memory", "search_memory", "rewrite_self", "set_model", "list_models", "propose_harness_change", "venice_api", "venice_reference", "media_task_list", "media_task_await", "generate_narration", "compose_media", "verify_media", "runtime_status", "runtime_explain", "set_plan", "update_step", "checkpoint"];
 
 // Names a self-authored ability may never shadow (built-ins + coordination +
 // the self-extension tools themselves).
@@ -272,6 +282,8 @@ You have an animated alien body and Venice-powered tools:
 - When the user requests an image, call generate_image. Reason about the right shape from where it will be used and set width/height (pixels, up to 1280 per side) to match - there is no fixed menu, you choose the exact dimensions: vertical for phones, Reels, Stories, or TikTok (e.g. 720x1280); wide for banners or covers (e.g. 1280x320 or 1280x720); square otherwise. Pick the shape on the first generation rather than defaulting to square and waiting to be corrected. The result renders inline; never claim you can only make squares, cannot set dimensions, or that an image can only be delivered as a file.
 - When the user requests a video, first establish a compact creative brief in one natural question: desired length, standard or high quality, and whether it should have no audio, natural sound, or music (including the music mood). Also infer aspect_ratio from the destination (vertical "9:16" for Reels/Stories/TikTok, otherwise "16:9" or whatever fits) and confirm it in the brief rather than defaulting silently. Do not call generate_video until those choices are known or the user explicitly accepts your suggested defaults. Then call generate_video. The tool quotes first and queues automatically below the configured limit. If it returns quoted, state the exact price once and ask for confirmation. Set confirmed=true only after the user explicitly confirms that price and preserve the same brief on the confirmed call.
 - When the user requests music or a soundscape, use generate_music with the same confirmation rule.
+- To make a finished video with narration: write the narration, turn it into audio with generate_narration, then combine the video with that narration (and any music) into one deliverable with compose_media. compose_media returns a single finished video asset.
+- Before you call any produced video final, verify it with verify_media (it uses ffprobe, not a guess): confirm it opens, its orientation matches the destination (portrait 9:16 for Reels), it has audio when it should, and the duration is right. Report what you verified. If verify_media or compose_media reports the tooling is unavailable, say ffmpeg needs installing rather than pretending you checked.
 - Video and music are asynchronous: generate_video and generate_music return a queued job, not a finished file. In a normal chat turn the interface auto-delivers a video you queued. For anything else - a job you queued through the raw API, one a worker queued, or when the user asks you to fetch, re-check, or "show" a video - call media_task_list to read the true status and media_task_await (with the taskId, or queueId+model+kind) to wait for it and deliver the finished file into the chat. Always create media through generate_video/generate_music rather than the raw venice_api so the job is tracked and deliverable. If a generation call fails (for example an image-to-video 400), recover by retrying through generate_video itself (for instance with source_image none for text-to-video); do not switch to the raw venice_api to make or fetch media. Never download media with curl or save it to disk in order to show it - inline rendering happens automatically through generate_video and media_task_await. Never say a video is ready, delivered, or retrieved unless media_task_list shows it succeeded or media_task_await returned it; if it is still rendering, say exactly that.
 - Queued video and music jobs render asynchronously: the finished media is delivered into the chat automatically when it is ready, and you can also check status or fetch the result yourself with venice_api (for example GET /video/retrieve or /audio/retrieve with the job/request id from the queue response). If a job seems stuck or you need the file to organize or verify it, retrieve it; never tell the user you cannot check or retrieve a queued job.
 - You can delegate to subagents: call delegate_task to hand a focused sub-task to a scoped worker (live research and constructive file work), and call it several times to run workers in parallel. Reach for this when a request splits into independent parts, for example analyzing several papers, files, or topics at once; then synthesize the workers' returned results yourself. Never tell the user you cannot spawn, launch, or delegate to subagents, because you can.
@@ -661,23 +673,27 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const proposeHarnessChange: AgentTool = {
     name: "propose_harness_change",
     label: "Propose a harness improvement",
-    description: "Flag a recurring problem to Gondola Lab, your external control plane, so it can review recent run traces and draft a bounded, testable configuration change. Use this only for a repeated failure or inefficiency in how you are set up, not a one-off. You cannot evaluate, approve, or apply changes yourself: the Lab evaluates independently and a human (or its opt-in autopilot) decides. This is safe: it only asks the Lab to look, and never changes your configuration by itself.",
+    description: "Flag a problem to Gondola Lab, your external control plane. It is always recorded (even if no bounded change can be drafted yet) and coalesced with prior flags of the same problem, so a recurring failure accumulates a count the Lab and the owner can see. Use it for a repeated failure or inefficiency in how you are set up. You cannot evaluate, approve, or apply changes yourself; the Lab evaluates independently and a human (or its opt-in autopilot) decides.",
     parameters: Type.Object({
-      reason: Type.String({ minLength: 3, maxLength: 240 }),
+      reason: Type.String({ minLength: 3, maxLength: 600 }),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {
       const input = params as { reason: string };
       const proposal = await generateProposal(input.reason, { modelReview: true }).catch(() => null);
+      // Always record the flag so it is never silently dropped; coalesces with
+      // prior flags of the same problem and returns the running count.
+      const flag = await recordFlag({ reason: input.reason, conversationId: runtime.sessionId, proposalDrafted: Boolean(proposal) }).catch(() => undefined);
+      const seen = flag && flag.count > 1 ? ` This problem has now been flagged ${flag.count} times.` : "";
       if (!proposal) {
         return {
-          content: [{ type: "text", text: "I flagged this to Gondola Lab, but it did not find a new, bounded change to propose from recent traces right now." }],
-          details: { kind: "harness_proposal", created: false },
+          content: [{ type: "text", text: `Logged to Gondola Lab as an open observation.${seen} The Lab did not find a bounded, testable change to draft from the current evidence, but it is recorded and visible in the Lab, not discarded.` }],
+          details: { kind: "harness_proposal", created: false, flagId: flag?.id, flagCount: flag?.count },
         };
       }
       return {
-        content: [{ type: "text", text: `I flagged this to Gondola Lab and it drafted a proposal: ${proposal.observedProblem} It will be evaluated before anything changes. Reason: ${input.reason}` }],
-        details: { kind: "harness_proposal", created: true, proposalId: proposal.proposalId },
+        content: [{ type: "text", text: `Flagged to Gondola Lab, which drafted a proposal: ${proposal.observedProblem} It will be evaluated before anything changes.${seen}` }],
+        details: { kind: "harness_proposal", created: true, proposalId: proposal.proposalId, flagId: flag?.id, flagCount: flag?.count },
       };
     },
   };
@@ -806,18 +822,38 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
       const input = params as { prompt: string; title?: string; width?: number; height?: number };
       const prompt = input.prompt;
       const result = await generateImage(prompt, runtime.settings.imageModel, signal, { width: input.width, height: input.height });
-      // Remember it so the user can ask to animate "the image you just made".
+      // Remember the inline data URL so image-to-video (which needs a fetchable
+      // image, not a localhost asset path) can still animate "the image you just made".
       runtime.lastGeneratedImageUrl = result.dataUrl;
+      // Persist the image as a durable asset so it survives reloads and chat
+      // switches and serves via the (Range-capable) asset endpoint, instead of
+      // living only as an ephemeral data URL in client state. Falls back to the
+      // data URL if the save fails.
+      let url = result.dataUrl;
+      let assetId = result.id ?? crypto.randomUUID();
+      try {
+        const base64 = result.dataUrl.split(",")[1] ?? "";
+        if (base64) {
+          await mkdir(MEDIA_DIR, { recursive: true });
+          const filePath = nodePath.join(MEDIA_DIR, `image-${crypto.randomUUID()}.webp`);
+          await fsWriteFile(filePath, Buffer.from(base64, "base64"));
+          const asset = await registerAsset({ kind: "image", path: filePath, prompt, model: runtime.settings.imageModel, metadata: { contentType: "image/webp" } });
+          assetId = asset.id;
+          url = `/api/media/asset?id=${encodeURIComponent(asset.id)}`;
+        }
+      } catch {
+        // Keep the inline data URL; the image still renders this turn.
+      }
       return {
         content: [{ type: "text", text: "The image was generated and is visible in the chat." }],
         details: {
           kind: "image",
           status: "ready",
-          id: result.id ?? crypto.randomUUID(),
+          id: assetId,
           title: input.title ?? "Venice creation",
           prompt,
           model: runtime.settings.imageModel,
-          url: result.dataUrl,
+          url,
         },
       };
     },
@@ -1455,10 +1491,109 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     },
   };
 
+  // Resolve an asset id or a media file path to an on-disk path inside the
+  // managed media folder (the only place the asset endpoint will serve from).
+  const resolveMediaPath = async (assetOrPath: string): Promise<string | null> => {
+    const asset = await getAsset(assetOrPath).catch(() => undefined);
+    const candidate = asset?.path ?? (nodePath.isAbsolute(assetOrPath) ? assetOrPath : nodePath.join(MEDIA_DIR, assetOrPath));
+    return isPathWithinMediaDir(candidate) ? candidate : null;
+  };
+
+  const verifyMediaTool: AgentTool = {
+    name: "verify_media",
+    label: "Verify media",
+    description: "Deterministically inspect a produced media file (by assetId) using ffprobe, instead of guessing. Returns whether it opens, its width/height and orientation, duration, and whether it has an audio track - and checks them against optional expectations (expectOrientation, expectAudio, minDurationSec). Use this to verify a generated video before you call it done: is it vertical, does it have sound, is the duration right.",
+    parameters: Type.Object({
+      assetId: Type.String({ minLength: 1 }),
+      expectOrientation: Type.Optional(Type.Union([Type.Literal("portrait"), Type.Literal("landscape"), Type.Literal("square")])),
+      expectAudio: Type.Optional(Type.Boolean()),
+      minDurationSec: Type.Optional(Type.Number()),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const input = params as { assetId: string; expectOrientation?: Orientation; expectAudio?: boolean; minDurationSec?: number };
+      if (!mediaToolingAvailable()) {
+        return { content: [{ type: "text", text: "Media verification is unavailable: ffprobe is not installed. Ask the owner to install ffmpeg (or the ffmpeg-static/ffprobe-static packages)." }], details: { kind: "verification", ok: false, available: false } };
+      }
+      const filePath = await resolveMediaPath(input.assetId);
+      if (!filePath) return { content: [{ type: "text", text: `No accessible media file for asset "${input.assetId}".` }], details: { kind: "verification", ok: false } };
+      const probe = await probeMedia(filePath);
+      const checks: { name: string; passed: boolean; detail: string }[] = [
+        { name: "opens", passed: probe.ok, detail: probe.ok ? "file opened and parsed" : (probe.error ?? "could not read the file") },
+      ];
+      if (input.expectOrientation) checks.push({ name: `orientation_is_${input.expectOrientation}`, passed: probe.orientation === input.expectOrientation, detail: `orientation is ${probe.orientation ?? "unknown"} (${probe.width ?? "?"}x${probe.height ?? "?"})` });
+      if (input.expectAudio !== undefined) checks.push({ name: input.expectAudio ? "has_audio" : "no_audio", passed: probe.hasAudio === input.expectAudio, detail: probe.hasAudio ? "an audio track is present" : "no audio track" });
+      if (input.minDurationSec !== undefined) checks.push({ name: "min_duration", passed: (probe.durationSec ?? 0) >= input.minDurationSec, detail: `duration ${probe.durationSec ?? 0}s vs required >= ${input.minDurationSec}s` });
+      const passed = checks.every((check) => check.passed);
+      const summary = `${passed ? "Verification passed" : "Verification found problems"}: ${probe.width ?? "?"}x${probe.height ?? "?"}${probe.orientation ? ` (${probe.orientation})` : ""}, ${probe.durationSec ?? "?"}s, audio ${probe.hasAudio ? "yes" : "no"}.`;
+      return { content: [{ type: "text", text: summary }], details: { kind: "verification", ok: passed, probe, checks } };
+    },
+  };
+
+  const generateNarrationTool: AgentTool = {
+    name: "generate_narration",
+    label: "Generate narration",
+    description: "Turn narration text into a spoken audio file (Venice text-to-speech) saved as an audio asset you can then mux into a video with compose_media. Pass the exact words to speak; optionally a voice. Returns an assetId.",
+    parameters: Type.Object({
+      text: Type.String({ minLength: 1, maxLength: 4000 }),
+      voice: Type.Optional(Type.String({ maxLength: 40 })),
+      title: Type.Optional(Type.String({ maxLength: 80 })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const input = params as { text: string; voice?: string; title?: string };
+      const { bytes } = await synthesizeSpeech({ text: input.text, voice: input.voice, model: runtime.settings.ttsModel }, signal);
+      await mkdir(MEDIA_DIR, { recursive: true });
+      const filePath = nodePath.join(MEDIA_DIR, `narration-${crypto.randomUUID()}.mp3`);
+      await fsWriteFile(filePath, bytes);
+      const asset = await registerAsset({ kind: "audio", path: filePath, prompt: input.text.slice(0, 200), model: runtime.settings.ttsModel, metadata: { contentType: "audio/mpeg" } });
+      return {
+        content: [{ type: "text", text: `Narration audio is ready (asset ${asset.id}). Mux it into the video with compose_media.` }],
+        // kind "music" so the client renders it in the audio player (it only
+        // knows image/video/music); the underlying asset is registered as audio.
+        details: { kind: "music", status: "ready", id: asset.id, title: input.title ?? "Narration", url: `/api/media/asset?id=${encodeURIComponent(asset.id)}` },
+      };
+    },
+  };
+
+  const composeMediaTool: AgentTool = {
+    name: "compose_media",
+    label: "Compose media",
+    description: "Combine a video asset with one or more audio assets (narration and/or music) into a single finished video file, using ffmpeg. Pass the video's assetId and the audio assetIds to lay over it (mixed if more than one). Returns the assetId of the finished, deliverable video; verify it with verify_media, then deliver it.",
+    parameters: Type.Object({
+      videoAssetId: Type.String({ minLength: 1 }),
+      audioAssetIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 4 }),
+      title: Type.Optional(Type.String({ maxLength: 80 })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const input = params as { videoAssetId: string; audioAssetIds: string[]; title?: string };
+      if (!mediaToolingAvailable()) {
+        return { content: [{ type: "text", text: "Composition is unavailable: ffmpeg is not installed. Ask the owner to install ffmpeg (or the ffmpeg-static package)." }], details: { kind: "video", status: "error", available: false } };
+      }
+      const videoPath = await resolveMediaPath(input.videoAssetId);
+      if (!videoPath) return { content: [{ type: "text", text: `No accessible video file for asset "${input.videoAssetId}".` }], details: { kind: "video", status: "error" } };
+      const audioPaths: string[] = [];
+      for (const id of input.audioAssetIds) {
+        const audioPath = await resolveMediaPath(id);
+        if (!audioPath) return { content: [{ type: "text", text: `No accessible audio file for asset "${id}".` }], details: { kind: "video", status: "error" } };
+        audioPaths.push(audioPath);
+      }
+      await mkdir(MEDIA_DIR, { recursive: true });
+      const outputPath = nodePath.join(MEDIA_DIR, `composed-${crypto.randomUUID()}.mp4`);
+      const result = await composeVideo({ videoPath, audioPaths, outputPath });
+      if (!result.ok) return { content: [{ type: "text", text: `Composition failed: ${result.error ?? "unknown error"}.` }], details: { kind: "video", status: "error", message: result.error } };
+      const asset = await registerAsset({ kind: "video", path: outputPath, parentAssetIds: [input.videoAssetId, ...input.audioAssetIds], metadata: { contentType: "video/mp4" } });
+      return {
+        content: [{ type: "text", text: `Composed video is ready (asset ${asset.id}) with ${audioPaths.length} audio track(s). Verify it with verify_media, then deliver it.` }],
+        details: { kind: "video", status: "ready", id: asset.id, title: input.title ?? "Composed video", url: `/api/media/asset?id=${encodeURIComponent(asset.id)}` },
+      };
+    },
+  };
+
   const builtInTools = [
     animateAvatar, shapePresence, memoryTool, searchMemoryTool, rewriteSelf, setModel, listModels, proposeHarnessChange, sessionSearchTool,
     runtimeStatusTool, runtimeExplainTool, setPlanTool, updateStepTool, checkpointTool,
-    webSearchTool, inspectCamera, imageTool, videoTool, musicTool, mediaTaskListTool, mediaTaskAwaitTool, veniceReferenceTool, veniceApiTool, delegateTool,
+    webSearchTool, inspectCamera, imageTool, videoTool, musicTool, generateNarrationTool, composeMediaTool, verifyMediaTool, mediaTaskListTool, mediaTaskAwaitTool, veniceReferenceTool, veniceApiTool, delegateTool,
     readFileTool, listDirectoryTool, createDirectoryTool, writeFileTool, editFileTool, movePathTool, deletePathTool, runCommandTool,
     createAbilityTool, testAbilityTool,
   ];
@@ -1649,6 +1784,21 @@ function createSession(input: {
       } else {
         void markFailureRecovered(event.toolName).catch(() => undefined);
       }
+      // Accumulate asset-backed media produced this turn so it can be persisted
+      // on the assistant message and rehydrated after a reload or chat switch
+      // (media used to live only in ephemeral client state and vanished).
+      const mediaDetails = result?.details as { kind?: string; id?: string; url?: string; status?: string; prompt?: string } | undefined;
+      if (!event.isError && mediaDetails && ["image", "video", "music"].includes(String(mediaDetails.kind)) && mediaDetails.id && mediaDetails.url) {
+        if (!runtime.producedMedia) runtime.producedMedia = [];
+        runtime.producedMedia = runtime.producedMedia.filter((item) => item.id !== mediaDetails.id);
+        runtime.producedMedia.push({
+          id: String(mediaDetails.id),
+          kind: mediaDetails.kind as PersistedMedia["kind"],
+          url: String(mediaDetails.url),
+          prompt: mediaDetails.prompt ? String(mediaDetails.prompt) : undefined,
+          status: mediaDetails.status ? String(mediaDetails.status) : undefined,
+        });
+      }
       if (event.toolName === "search_web" && !needsLiveWebResearch(runtime.currentMessage ?? "")) return;
       runtime.emit({
         type: "tool_end",
@@ -1747,6 +1897,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   session.runtime.currentMessage = input.message;
   session.runtime.webSearchCompleted = false;
   session.runtime.turnTrace = { startedAt: Date.now(), toolCalls: [] };
+  session.runtime.producedMedia = [];
   // Supervisor-safe resume: on every real turn, re-drive any media jobs for this
   // conversation that were left queued/running (detached after a crash or a turn
   // that ended early), so a queued job can never orphan from runtime state.
@@ -1949,6 +2100,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
             role: "assistant",
             text: assistantText,
             createdAt: new Date().toISOString(),
+            ...(session.runtime.producedMedia?.length ? { media: session.runtime.producedMedia } : {}),
           });
         }
         if (!input.hidden) {

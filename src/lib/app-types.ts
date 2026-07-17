@@ -153,11 +153,21 @@ export interface CatalogModel {
   traits?: string[];
 }
 
+export interface PersistedMedia {
+  id: string;
+  kind: "image" | "video" | "music";
+  url?: string;
+  prompt?: string;
+  status?: string;
+}
+
 export interface WorkspaceMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
   createdAt: number;
+  /** Media produced in this turn, persisted so it survives reloads/switches. */
+  media?: PersistedMedia[];
 }
 
 export interface AgentProfile {

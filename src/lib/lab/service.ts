@@ -29,6 +29,7 @@ import {
 } from "./evaluation";
 import { applyWorkflowPatch, assertAllowedProposalCategory, diffWorkflowPolicy, proposalSignature, reviewReliability, reviewTraces, type ProposalDraft, type ProposerFeedback } from "./reviewer";
 import { reviewFlaggedWithModel, type ReviewerCompletion } from "./reviewer-model";
+import { listFlags, type HarnessFlag } from "./flags";
 import { createLiveJudge, createLiveTaskRunner, makeLiveRunAgent } from "./runner";
 import type { ConfigVersion, EvaluationRecord, ImprovementProposal, RunTrace } from "./types";
 
@@ -339,20 +340,23 @@ export interface LabSnapshot {
   history: Awaited<ReturnType<typeof getConfigState>>["history"];
   traces: TraceSummary[];
   proposals: ImprovementProposal[];
+  flags: HarnessFlag[];
 }
 
 export async function getLabSnapshot(): Promise<LabSnapshot> {
-  const [champion, state, traces, proposals] = await Promise.all([
+  const [champion, state, traces, proposals, flags] = await Promise.all([
     getChampion(),
     getConfigState(),
     listTraces(12),
     listProposals(),
+    listFlags({ limit: 30 }),
   ]);
   return {
     champion: champion ?? null,
     history: state.history,
     traces: traces.map(summarizeTrace),
     proposals,
+    flags,
   };
 }
 
