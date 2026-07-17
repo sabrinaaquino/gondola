@@ -49,11 +49,50 @@ export async function GET(request: Request) {
   }
 
   const bytes = await readFile(asset.path);
+  const contentType = contentTypeFor(asset.path, asset.metadata?.contentType);
+  const baseHeaders = {
+    "Content-Type": contentType,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=31536000, immutable",
+  };
+
+  // Safari and other WebKit-based players require HTTP Range support to play
+  // video/audio: they probe with "Range: bytes=0-1" and silently refuse to
+  // render media when the server answers 200 with the full body instead of
+  // 206. Serve partial content when a Range header is present.
+  const range = request.headers.get("range");
+  const match = range ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null;
+  if (match && (match[1] !== "" || match[2] !== "")) {
+    const size = bytes.byteLength;
+    let start: number;
+    let end: number;
+    if (match[1] === "") {
+      // Suffix range: last N bytes.
+      const suffix = Number(match[2]);
+      start = Math.max(0, size - suffix);
+      end = size - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+    }
+    if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= size) {
+      return new Response(null, {
+        status: 416,
+        headers: { ...baseHeaders, "Content-Range": `bytes */${size}` },
+      });
+    }
+    const chunk = bytes.subarray(start, end + 1);
+    return new Response(chunk, {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        "Content-Range": `bytes ${start}-${end}/${size}`,
+        "Content-Length": String(chunk.byteLength),
+      },
+    });
+  }
+
   return new Response(bytes, {
-    headers: {
-      "Content-Type": contentTypeFor(asset.path, asset.metadata?.contentType),
-      "Content-Length": String(bytes.byteLength),
-      "Cache-Control": "private, max-age=31536000, immutable",
-    },
+    headers: { ...baseHeaders, "Content-Length": String(bytes.byteLength) },
   });
 }
