@@ -936,25 +936,28 @@ export async function greetFromFrame(frameDataUrl: string, preferredModel?: stri
   throw lastError instanceof Error ? lastError : new Error("Venice vision is temporarily unavailable");
 }
 
-export type ImageAspect = "square" | "portrait" | "landscape" | "wide";
+// Venice accepts explicit width/height. We only keep each side within Venice's
+// limits and snap to a multiple of 16 - there is deliberately no fixed menu of
+// shapes; the agent picks whatever pixels the task needs (e.g. 1280x320 for a
+// 4:1 banner, 720x1280 for a 9:16 reel). The chat renders the result inline at
+// its natural ratio.
+const IMAGE_SIDE_MIN = 256;
+const IMAGE_SIDE_MAX = 1280;
 
-// Known-good dimensions per aspect: long side capped at 1280 (Venice rejects
-// larger), sides are multiples of 16. "wide" (1280x320) is the proven banner
-// size. The chat renders whatever comes back inline, at its natural ratio.
-const IMAGE_DIMENSIONS: Record<ImageAspect, { width: number; height: number }> = {
-  square: { width: 1024, height: 1024 },
-  portrait: { width: 720, height: 1280 },
-  landscape: { width: 1280, height: 720 },
-  wide: { width: 1280, height: 320 },
-};
+function clampImageSide(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const snapped = Math.round(value / 16) * 16;
+  return Math.max(IMAGE_SIDE_MIN, Math.min(IMAGE_SIDE_MAX, snapped));
+}
 
 export async function generateImage(
   prompt: string,
   model: string,
   signal?: AbortSignal,
-  aspect: ImageAspect = "square",
+  dimensions?: { width?: number; height?: number },
 ): Promise<{ dataUrl: string; id?: string }> {
-  const { width, height } = IMAGE_DIMENSIONS[aspect] ?? IMAGE_DIMENSIONS.square;
+  const width = clampImageSide(dimensions?.width, 1024);
+  const height = clampImageSide(dimensions?.height, 1024);
   const response = await veniceJson<{ id?: string; images?: string[] }>(
     "/image/generate",
     {
@@ -994,13 +997,13 @@ export async function quoteAndQueueVideo(
     imageUrl?: string;
     /** Multiple reference images for consistency (reference-to-video). */
     referenceImageUrls?: string[];
-    /** Frame shape for text-to-video (9:16 for Reels/Stories/TikTok, 16:9 for wide). */
-    aspectRatio?: "16:9" | "9:16" | "1:1";
+    /** Frame shape for text-to-video, e.g. "16:9", "9:16", "1:1" - whatever the destination needs. */
+    aspectRatio?: string;
   },
   confirmed: boolean,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const aspectRatio = options.aspectRatio ?? "16:9";
+  const aspectRatio = options.aspectRatio?.trim() || "16:9";
   const referenceImages = (options.referenceImageUrls ?? []).filter(isImageUrl).slice(0, 9);
   const sourceImage = isImageUrl(options.imageUrl) ? options.imageUrl : referenceImages[0];
   const mode: "text" | "image" | "reference" = referenceImages.length > 1
