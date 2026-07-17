@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ApprovalPolicy } from "@/lib/app-types";
 
 // First-run onboarding gate. Rendered instead of the workspace until setup is
 // verified "ready". Talks only to the local /api/setup/* routes; the credential
@@ -38,7 +39,6 @@ export interface SetupStatusView {
 }
 
 type Screen = "welcome" | "connect" | "credential" | "capabilities" | "permissions";
-type ConfirmationPolicy = "always" | "risky";
 
 const CAPABILITY_LABELS: Array<{ key: string; label: string; blurb: string }> = [
   { key: "chat", label: "Conversation", blurb: "Natural back-and-forth chat" },
@@ -81,7 +81,7 @@ export function Onboarding({ initialStatus, onReady }: { initialStatus?: SetupSt
   // Permissions. File + terminal default OFF; terminal requires file access.
   const [fileAccess, setFileAccess] = useState(false);
   const [shellAccess, setShellAccess] = useState(false);
-  const [confirmation, setConfirmation] = useState<ConfirmationPolicy>("risky");
+  const [confirmation, setConfirmation] = useState<ApprovalPolicy>("risk_based");
 
   useEffect(() => {
     if (initialStatus) return;
@@ -166,7 +166,7 @@ export function Onboarding({ initialStatus, onReady }: { initialStatus?: SetupSt
     const shell = fileAccess && shellAccess;
     try {
       const savedSettings = JSON.parse(localStorage.getItem("nova-settings") ?? "{}") as Record<string, unknown>;
-      localStorage.setItem("nova-settings", JSON.stringify({ ...savedSettings, fileAccess, shellAccess: shell }));
+      localStorage.setItem("nova-settings", JSON.stringify({ ...savedSettings, fileAccess, shellAccess: shell, approvalPolicy: confirmation, persistentTasks: true }));
       localStorage.setItem(
         "nova-onboarding-permissions",
         JSON.stringify({ fileAccess, shellAccess: shell, confirmationPolicy: confirmation }),
@@ -308,11 +308,13 @@ export function Onboarding({ initialStatus, onReady }: { initialStatus?: SetupSt
 
             <label className="onb-field">
               <span>Confirmation policy</span>
-              <select value={confirmation} onChange={(event) => setConfirmation(event.target.value as ConfirmationPolicy)}>
-                <option value="always">Ask before every action</option>
-                <option value="risky">Ask before risky actions</option>
+              <select value={confirmation} onChange={(event) => setConfirmation(event.target.value as ApprovalPolicy)}>
+                <option value="risk_based">Ask only for risky actions</option>
+                <option value="always_ask">Always ask</option>
+                <option value="always_allow">Always allow</option>
+                <option value="never_allow">Never allow changes</option>
               </select>
-              <small className="onb-note">Destructive actions always ask for confirmation, whatever you choose here.</small>
+              <small className="onb-note">Protected credentials and sandbox boundaries stay enforced in every mode. You can change this policy later.</small>
             </label>
 
             <div className="onb-actions">

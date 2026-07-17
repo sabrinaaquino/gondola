@@ -39,6 +39,7 @@ import {
   REALTIME_MULTIMODAL_MODEL,
   type AgentPhase,
   type AgentSettings,
+  type ApprovalPolicy,
   type AvatarAction,
   type CatalogModel,
   type MediaArtifact,
@@ -54,6 +55,7 @@ import { FEATURES } from "@/lib/features";
 import { supportedReasoningEfforts } from "@/lib/model-capabilities";
 import { removeEmDashes } from "@/lib/text-style";
 import { takeEarlySpeechSegment } from "@/lib/voice-latency";
+import { shouldPersistTask } from "@/lib/task-intent";
 
 interface MessageAttachment {
   name: string;
@@ -91,6 +93,45 @@ interface ChatMessage {
   subagents?: SubAgentRun[];
   /** True when the supervisor recovered this reply after the inner loop failed. */
   recovered?: boolean;
+  /** User-visible execution state and tool activity for this turn. */
+  task?: TaskProgressView;
+}
+
+type TaskActivityStatus = "running" | "done" | "error" | "waiting";
+
+interface TaskActivityView {
+  id: string;
+  tool?: string;
+  label: string;
+  detail: string;
+  category?: string;
+  risk?: string;
+  status: TaskActivityStatus;
+}
+
+interface TaskStepView {
+  id: string;
+  title: string;
+  status: string;
+  detail?: string;
+}
+
+interface ApprovalRequestView {
+  id: string;
+  tool: string;
+  summary: string;
+  risk?: string;
+  status: "pending" | "approved" | "rejected";
+}
+
+interface TaskProgressView {
+  goal: string;
+  status: "running" | "waiting" | "done" | "error";
+  steps: TaskStepView[];
+  activities: TaskActivityView[];
+  checkpoint?: string;
+  lastHeartbeatAt?: number;
+  approval?: ApprovalRequestView;
 }
 
 interface QueuedMessage {
@@ -116,7 +157,14 @@ interface GoalState {
   condition: string;
   turns: number;
   reason: string;
-  status: "running" | "achieved" | "capped" | "stopped";
+  status: "running" | "waiting" | "achieved" | "capped" | "stopped";
+}
+
+interface GoalRunOptions {
+  initialVisible?: boolean;
+  attachments?: ChatAttachment[];
+  /** First private continuation, used to resume an exact approved action. */
+  initialDirective?: string;
 }
 
 // The /goal inner loop auto-continues the agent after each turn until a separate
@@ -217,6 +265,16 @@ interface AgentStreamEvent {
   ok?: boolean;
   // Supervisor recovery signal.
   recovered?: boolean;
+  toolCallId?: string;
+  label?: string;
+  detail?: string;
+  category?: string;
+  risk?: string;
+  goal?: string;
+  state?: { goal?: string | null; steps?: TaskStepView[] };
+  strategy?: string;
+  autoResume?: boolean;
+  at?: number;
 }
 
 interface SpeechFrame {
@@ -431,12 +489,23 @@ function toolStatus(name: string | undefined, agentName: string): string {
     case "verify_media": return "Verifying the video";
     case "media_task_await": return "Waiting for media to finish rendering";
     case "media_task_list": return "Checking on media jobs";
-    case "delegate_task": return "Delegating to a sub-agent";
-    case "orchestrate": return "Coordinating sub-agents";
-    case "run_command": return "Running a command";
+    case "read_file": return "Reading a file";
+    case "list_directory": return "Inspecting a folder";
+    case "create_directory": return "Creating a folder";
     case "write_file": return "Writing a file";
     case "edit_file": return "Editing a file";
-    default: return name?.startsWith("mcp_") ? "Using an assigned MCP tool" : "Using a Venice capability";
+    case "move_path": return "Moving or renaming a file";
+    case "delete_path": return "Moving a file to trash";
+    case "run_command": return "Running a terminal command";
+    case "set_plan": return "Planning the task";
+    case "update_step": return "Updating task progress";
+    case "checkpoint": return "Saving a task checkpoint";
+    case "propose_harness_change": return "Consulting Gondola Lab";
+    case "runtime_status": return "Checking runtime state";
+    case "runtime_explain": return "Explaining runtime state";
+    case "delegate_task": return "Delegating focused work";
+    case "orchestrate": return "Coordinating sub-agents";
+    default: return name?.startsWith("mcp_") ? "Using a connected service" : (name ? name.replace(/_/g, " ") : "Working on the request");
   }
 }
 
@@ -685,6 +754,78 @@ function SubAgentCard({ run }: { run: SubAgentRun }) {
   );
 }
 
+function TaskProgressCard({
+  task,
+  approvalPolicy,
+  onApproval,
+  onPolicyChange,
+}: {
+  task: TaskProgressView;
+  approvalPolicy: ApprovalPolicy;
+  onApproval: (request: ApprovalRequestView, status: "approved" | "rejected") => void;
+  onPolicyChange: (policy: ApprovalPolicy) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const active = [...task.activities].reverse().find((activity) => activity.status === "running");
+  const complete = task.activities.filter((activity) => activity.status === "done").length;
+  const headline = task.status === "waiting" ? "Waiting for your approval"
+    : task.status === "done" ? "Task complete"
+      : task.status === "error" ? "Task needs attention"
+        : active?.label ?? "Working on the task";
+  return (
+    <div className={`task-progress-card is-${task.status}`}>
+      <button type="button" className="task-progress-toggle" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+        <span className="task-progress-pulse" aria-hidden>{task.status === "running" ? <i /> : null}</span>
+        <span className="task-progress-heading"><strong>{headline}</strong><small>{task.goal}</small></span>
+        <span className="task-progress-count">{complete}/{task.activities.length}</span>
+        <span className="task-progress-caret" aria-hidden><ChevronDownIcon size={12} /></span>
+      </button>
+      {open ? (
+        <div className="task-progress-body">
+          {task.steps.length ? (
+            <ol className="task-plan-steps">
+              {task.steps.map((step) => (
+                <li key={step.id} className={`is-${step.status}`}><i /><span><strong>{step.title}</strong>{step.detail ? <small>{step.detail}</small> : null}</span></li>
+              ))}
+            </ol>
+          ) : null}
+          <ol className="task-activity-list">
+            {task.activities.map((activity) => (
+              <li key={activity.id} className={`is-${activity.status}`}>
+                <i /><span><strong>{activity.label}</strong><small>{activity.detail}</small></span>
+                {activity.risk ? <em>{activity.risk} risk</em> : null}
+              </li>
+            ))}
+          </ol>
+          {task.checkpoint ? <div className="task-checkpoint">Checkpoint: {task.checkpoint}</div> : null}
+          {task.approval?.status === "pending" ? (
+            <div className="approval-card">
+              <div className="approval-copy">
+                <strong>Allow this system change?</strong>
+                <small>{task.approval.summary}</small>
+              </div>
+              <div className="approval-actions">
+                <button type="button" className="approval-allow" onClick={() => onApproval(task.approval as ApprovalRequestView, "approved")}>Allow once</button>
+                <button type="button" className="approval-deny" onClick={() => onApproval(task.approval as ApprovalRequestView, "rejected")}>Deny</button>
+              </div>
+              <label className="approval-policy">
+                <span>Future actions</span>
+                <select value={approvalPolicy} onChange={(event) => onPolicyChange(event.target.value as ApprovalPolicy)}>
+                  <option value="risk_based">Ask only when risky</option>
+                  <option value="always_ask">Always ask</option>
+                  <option value="always_allow">Always allow</option>
+                  <option value="never_allow">Never allow</option>
+                </select>
+              </label>
+              <small className="approval-boundary">Credentials and sandbox escape remain blocked in every mode.</small>
+            </div>
+          ) : task.approval ? <div className={`approval-resolution is-${task.approval.status}`}>{task.approval.status === "approved" ? "Allowed" : "Denied"}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Workspace() {
   const [sessionId, setSessionId] = useState("");
   const [phase, setPhase] = useState<AgentPhase>("idle");
@@ -699,8 +840,12 @@ function Workspace() {
   const [input, setInput] = useState("");
   const [goal, setGoal] = useState<GoalState | null>(null);
   const goalActiveRef = useRef(false);
+  const goalRef = useRef<GoalState | null>(null);
+  const approvalPendingRef = useRef(false);
+  const autoResumeAttemptsRef = useRef(0);
   const messagesRef = useRef<ChatMessage[]>([]);
-  const sendMessageRef = useRef<((rawMessage: string, options?: SendMessageOptions) => Promise<void>) | null>(null);
+  const sendMessageRef = useRef<((rawMessage: string, options?: SendMessageOptions) => Promise<string>) | null>(null);
+  const runGoalRef = useRef<((condition: string, options?: GoalRunOptions) => Promise<void>) | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string>();
   const [editDraft, setEditDraft] = useState("");
   const [toolLabel, setToolLabel] = useState("");
@@ -971,6 +1116,16 @@ function Workspace() {
       try {
         const parsed = JSON.parse(saved) as Partial<AgentSettings>;
         const migrated = { ...DEFAULT_SETTINGS, ...parsed };
+        if (!parsed.approvalPolicy) {
+          try {
+            const legacy = JSON.parse(localStorage.getItem("nova-onboarding-permissions") ?? "{}") as { confirmationPolicy?: string };
+            migrated.approvalPolicy = legacy.confirmationPolicy === "always" ? "always_ask"
+              : legacy.confirmationPolicy === "risky" ? "risk_based"
+                : DEFAULT_SETTINGS.approvalPolicy;
+          } catch {
+            migrated.approvalPolicy = DEFAULT_SETTINGS.approvalPolicy;
+          }
+        }
         if (!localStorage.getItem("nova-fast-voice-v1")) {
           migrated.ttsModel = "tts-xai-v1";
           migrated.voice = "rex";
@@ -2138,7 +2293,7 @@ function Workspace() {
     if ((!message && !outgoingAttachments.length) || !sessionId || (isBusy && options.hidden && !options.goalTurn)) {
       if (!sessionId && (message || outgoingAttachments.length)) setConnectionError("Your conversation is still loading. Try again in a moment.");
       if (options.hidden) cameraGreetingInFlightRef.current = false;
-      return;
+      return "";
     }
     // When a typed request asks to be seen but the camera is off, request
     // permission inline (Allow button) instead of letting the agent reply that
@@ -2149,7 +2304,7 @@ function Workspace() {
       && settings.cameraAwareness && !cameraOn && messageNeedsVision(message)) {
       setInput("");
       setCameraPrompt({ message, voiceTurn: options.voiceTurn });
-      return;
+      return "";
     }
     setCameraPrompt(null);
 
@@ -2169,7 +2324,7 @@ function Workspace() {
       setConnectionError("");
       setInput("");
       if (outgoingAttachments.length) setAttachments([]);
-      return;
+      return "";
     }
 
     // Images ride along as vision input; text files are inlined so the model
@@ -2200,6 +2355,7 @@ function Workspace() {
     setInput("");
     setPhase("thinking");
     setToolLabel("");
+    if (!options.hidden) autoResumeAttemptsRef.current = 0;
     const userMessage: ChatMessage = {
       id: options.existingUserMessageId ?? createId("user"),
       role: "user",
@@ -2214,6 +2370,29 @@ function Workspace() {
     };
     const assistantId = createId("assistant");
     const acknowledgement = taskAcknowledgement(message);
+    const trackTask = options.goalTurn || shouldPersistTask(message);
+    const continuedTaskMessage = options.hidden && options.goalTurn
+      ? [...messagesRef.current].reverse().find((item) => item.role === "assistant" && item.task)
+      : undefined;
+    const taskDisplayId = continuedTaskMessage?.id ?? assistantId;
+    const initialTask: TaskProgressView | undefined = trackTask
+      ? continuedTaskMessage?.task
+        ? {
+            ...continuedTaskMessage.task,
+            status: "running",
+            activities: [
+              ...continuedTaskMessage.task.activities.map((activity) => activity.status === "running" ? { ...activity, status: "done" as const } : activity),
+              { id: `${assistantId}-resume`, label: "Continuing the task", detail: "Resuming from verified progress", category: "planning", status: "running" },
+            ],
+          }
+        : {
+            goal: message.slice(0, 500),
+            status: "running",
+            steps: [],
+            activities: [{ id: `${assistantId}-start`, label: "Understanding the request", detail: "Preparing the next concrete action", category: "planning", status: "running" }],
+          }
+      : undefined;
+    approvalPendingRef.current = false;
     setMessages((current) => {
       const existingQueuedMessage = options.existingUserMessageId
         ? current.find((item) => item.id === options.existingUserMessageId)
@@ -2227,8 +2406,11 @@ function Workspace() {
             ...(existingQueuedMessage ? [{ ...existingQueuedMessage, queued: false }] : []),
           ]
         : current;
+      const preparedWithTask = initialTask && taskDisplayId !== assistantId
+        ? prepared.map((item) => item.id === taskDisplayId ? { ...item, task: initialTask } : item)
+        : prepared;
       return [
-        ...prepared,
+        ...preparedWithTask,
         ...(options.hidden || options.existingUserMessageId ? [] : [userMessage]),
         ...(options.silent ? [] : [{
           id: assistantId,
@@ -2236,6 +2418,7 @@ function Workspace() {
           text: "",
           statusText: acknowledgement ?? "Thinking about that…",
           streaming: true,
+          task: initialTask,
           createdAt: Date.now(),
         }]),
         ...waitingMessages,
@@ -2262,6 +2445,8 @@ function Workspace() {
     let queuedEarlySpeech = false;
     let lastToolResult = "";
     let toolFailed = false;
+    let autoResumeRequested = false;
+    let turnResult = "";
     let firstDeltaReceived = false;
     // Mirror the in-flight assistant message per conversation so switching away
     // and back re-attaches the live reply (see applyConversation) instead of
@@ -2270,6 +2455,7 @@ function Workspace() {
     const liveCreatedAt = Date.now();
     let liveThinking = "";
     let liveThinkingStreaming = false;
+    let liveTask = initialTask;
     let liveStatusText: string | undefined = acknowledgement ?? "Thinking about that…";
     const syncLive = () => {
       if (!trackLive) return;
@@ -2281,8 +2467,17 @@ function Workspace() {
         streaming: true,
         thinking: liveThinking || undefined,
         thinkingStreaming: liveThinkingStreaming,
+        task: liveTask,
         createdAt: liveCreatedAt,
       });
+    };
+    const updateTaskProgress = (update: (task: TaskProgressView) => TaskProgressView) => {
+      const empty: TaskProgressView = { goal: message.slice(0, 500), status: "running", steps: [], activities: [] };
+      liveTask = update(liveTask ?? empty);
+      ui(() => setMessages((current) => current.map((item) => item.id === taskDisplayId
+        ? { ...item, task: update(item.task ?? empty) }
+        : item)));
+      syncLive();
     };
     syncLive();
     // At most one spoken "here's what I'm doing" line per turn (either the
@@ -2435,10 +2630,33 @@ function Workspace() {
               }
               : item)));
             syncLive();
+          } else if (event.type === "heartbeat") {
+            if (liveTask) updateTaskProgress((task) => ({ ...task, lastHeartbeatAt: event.at ?? Date.now() }));
+          } else if (event.type === "task_start" && event.goal) {
+            updateTaskProgress((task) => ({ ...task, goal: event.goal as string, status: "running" }));
+          } else if (event.type === "task_state" && event.state) {
+            updateTaskProgress((task) => ({
+              ...task,
+              goal: event.state?.goal?.trim() || task.goal,
+              steps: Array.isArray(event.state?.steps) ? event.state.steps : task.steps,
+              status: "running",
+            }));
+          } else if (event.type === "task_checkpoint" && event.label) {
+            updateTaskProgress((task) => ({ ...task, checkpoint: event.label }));
           } else if (event.type === "tool_start") {
-            const label = toolStatus(event.name, agentName);
+            const label = event.label?.trim() || toolStatus(event.name, agentName);
+            const detail = event.detail?.trim() || "Working with this capability";
+            const activityId = event.toolCallId || `${event.name ?? "tool"}-${Date.now()}`;
             liveStatusText = event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…`;
             ui(() => { setPhase("tool"); setToolLabel(label); });
+            updateTaskProgress((task) => ({
+              ...task,
+              status: "running",
+              activities: [
+                ...task.activities.map((activity) => activity.status === "running" && !activity.tool ? { ...activity, status: "done" as const } : activity),
+                { id: activityId, tool: event.name, label, detail, category: event.category, risk: event.risk, status: "running" },
+              ],
+            }));
             // Narrate the action aloud so a voice turn doesn't go silent while a
             // tool (web search, camera, media, etc.) runs. Only once per turn and
             // only before the spoken answer has begun, so it never interrupts.
@@ -2456,6 +2674,26 @@ function Workspace() {
               : item)));
             syncLive();
           } else if (event.type === "tool_end") {
+            const approvalId = typeof event.details?.approvalId === "string" ? event.details.approvalId : undefined;
+            const approvalTool = typeof event.details?.approvalTool === "string" ? event.details.approvalTool : event.name;
+            const approvalSummary = typeof event.details?.approvalSummary === "string" ? event.details.approvalSummary : undefined;
+            const needsApproval = event.details?.needsConfirmation === true && approvalId && approvalTool && approvalSummary;
+            if (needsApproval) approvalPendingRef.current = true;
+            updateTaskProgress((task) => {
+              let matched = false;
+              const activities = task.activities.map((activity) => {
+                const same = event.toolCallId ? activity.id === event.toolCallId : (!matched && activity.status === "running" && activity.tool === event.name);
+                if (!same) return activity;
+                matched = true;
+                return { ...activity, status: needsApproval ? "waiting" as const : event.isError ? "error" as const : "done" as const };
+              });
+              return {
+                ...task,
+                activities,
+                status: needsApproval ? "waiting" : event.isError ? "error" : "running",
+                ...(needsApproval ? { approval: { id: approvalId, tool: approvalTool, summary: approvalSummary, risk: String(event.details?.approvalRisk ?? event.risk ?? ""), status: "pending" as const } } : {}),
+              };
+            });
             ui(() => {
               const mediaId = handleToolResult(event);
               if (mediaId) {
@@ -2507,6 +2745,7 @@ function Workspace() {
                 item.id === assistantId ? { ...item, recovered: true } : item
               ))));
             }
+            if (event.autoResume === true) autoResumeRequested = true;
           } else if (event.type === "error") {
             throw new Error(event.message ?? "The Venice agent returned an error");
           }
@@ -2517,15 +2756,29 @@ function Workspace() {
       const completedText = finalText.trim() || lastToolResult || (toolFailed
         ? "I couldn’t finish that action just now. Please try it once more."
         : "I didn’t receive a complete answer. Please try that again.");
+      if (liveTask) {
+        liveTask = {
+          ...liveTask,
+          status: approvalPendingRef.current ? "waiting" : toolFailed ? "error" : "done",
+          activities: liveTask.activities.map((activity) => activity.status === "running" ? { ...activity, status: "done" } : activity),
+        };
+      }
+      turnResult = completedText;
       ui(() => {
-        setMessages((current) => current.map((item) => item.id === assistantId ? {
-          ...item,
-          text: item.text || completedText,
-          streaming: false,
-          statusText: undefined,
-          thinkingStreaming: false,
-          thinkingMs: item.thinkingMs ?? (item.thinkingStartedAt ? Date.now() - item.thinkingStartedAt : undefined),
-        } : item));
+        setMessages((current) => current.map((item) => {
+          if (item.id === assistantId) {
+            return {
+              ...item,
+              text: item.text || completedText,
+              streaming: false,
+              statusText: undefined,
+              thinkingStreaming: false,
+              thinkingMs: item.thinkingMs ?? (item.thinkingStartedAt ? Date.now() - item.thinkingStartedAt : undefined),
+              task: liveTask,
+            };
+          }
+          return item.id === taskDisplayId ? { ...item, task: liveTask } : item;
+        }));
         setToolLabel("");
       });
       const finalSpokenText = finalText || completedText;
@@ -2542,27 +2795,35 @@ function Workspace() {
       // A normal abort (user interrupted, or a new turn took over) is handled by
       // the incoming turn. Bail without touching its state. A watchdog-driven
       // abort, however, must be finalized here so the UI doesn't hang.
-      if (aborted && !watchdogTripped) return;
+      if (aborted && !watchdogTripped) return "";
       const messageText = watchdogTripped
         ? "That reply stalled, so I stopped waiting. Please try again."
         : friendlyAgentError(error);
+      turnResult = messageText;
+      if (liveTask) liveTask = { ...liveTask, status: "error" };
       if (isActiveTurn() && !watchdogTripped) setConnectionError(messageText);
       ui(() => {
         setToolLabel("");
-        setMessages((current) => current.map((item) => item.id === assistantId ? {
-          ...item,
-          // Preserve whatever streamed in before a stall; replace only on a hard error.
-          text: watchdogTripped ? (item.text.trim() || messageText) : messageText,
-          streaming: false,
-          statusText: undefined,
-          thinkingStreaming: false,
-        } : item));
+        setMessages((current) => current.map((item) => {
+          if (item.id === assistantId) {
+            return {
+              ...item,
+              // Preserve whatever streamed in before a stall; replace only on a hard error.
+              text: watchdogTripped ? (item.text.trim() || messageText) : messageText,
+              streaming: false,
+              statusText: undefined,
+              thinkingStreaming: false,
+              task: liveTask,
+            };
+          }
+          return item.id === taskDisplayId ? { ...item, task: liveTask } : item;
+        }));
       });
       // Persist this terminal reply so it survives a reload or chat switch. The
       // supervisor already persists server-side recoveries; this covers the paths
       // that reach the client as an error/stall (network failure, watchdog), so a
       // turn never leaves your message with a reply that later disappears.
-      if (isActiveTurn() && messageText.trim()) {
+      if (isActiveTurn() && !options.hidden && messageText.trim()) {
         void persistAssistantMessage(assistantId, messageText, Date.now());
       }
       // Don't cut off a first sentence that may still be playing; otherwise drop
@@ -2576,6 +2837,13 @@ function Workspace() {
       if (requestAbortRef.current === controller) requestAbortRef.current = undefined;
       if (bargeInCapturePendingRef.current) setVoiceLoopRevision((value) => value + 1);
       if (options.hidden) cameraGreetingInFlightRef.current = false;
+      if (autoResumeRequested && !options.goalTurn && !approvalPendingRef.current && isActiveTurn() && autoResumeAttemptsRef.current < 2) {
+        autoResumeAttemptsRef.current += 1;
+        queueMicrotask(() => void sendMessageRef.current?.(
+          "Resume automatically from the latest durable checkpoint. Do not repeat successful side effects. Inspect the saved execution state, continue the unfinished steps, verify the result, and deliver it.",
+          { hidden: true, goalTurn: true },
+        ));
+      }
       // The agent stream has closed. Re-settle the voice phase in case a short
       // reply finished speaking while the stream was still technically open.
       // otherwise the UI could stay stuck on "Thinking".
@@ -2603,21 +2871,65 @@ function Workspace() {
         }
       }
     }
+    return turnResult;
   }, [activeAgentId, agentName, cameraOn, captureFrame, clearConversationRunning, clearSpeechQueue, handleToolResult, isBusy, markConversationRunning, queueSpeech, refreshWorkspace, sessionId, settings, settleSpeechPhase, updateMessageQueue, voiceOn]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => { goalRef.current = goal; }, [goal]);
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
+
+  const changeApprovalPolicy = useCallback((approvalPolicy: ApprovalPolicy) => {
+    setSettings((current) => ({ ...current, approvalPolicy }));
+  }, []);
+
+  const decideApproval = useCallback(async (request: ApprovalRequestView, status: "approved" | "rejected") => {
+    try {
+      const response = await fetch("/api/approvals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "resolve", id: request.id, status }),
+      });
+      if (!response.ok) throw new Error("The approval decision could not be saved.");
+      approvalPendingRef.current = false;
+      setMessages((current) => current.map((item) => item.task?.approval?.id === request.id ? {
+        ...item,
+        task: {
+          ...item.task,
+          status: status === "approved" ? "running" : "error",
+          approval: { ...item.task.approval, status },
+        },
+      } : item));
+      if (status === "approved") {
+        const directive = `The owner approved this exact action once: ${request.summary}. Retry the ${request.tool} call with the same arguments, then continue the unfinished task, verify the result, and deliver it.`;
+        const waitingGoal = goalRef.current?.status === "waiting" ? goalRef.current.condition : undefined;
+        const approvalGoal = messagesRef.current.find((item) => item.task?.approval?.id === request.id)?.task?.goal;
+        if ((waitingGoal || approvalGoal) && runGoalRef.current) {
+          void runGoalRef.current(waitingGoal || approvalGoal || request.summary, { initialDirective: directive });
+        } else {
+          void sendMessage(directive, { hidden: true, goalTurn: true });
+        }
+      } else if (goalRef.current?.status === "waiting") {
+        setGoal((current) => current ? { ...current, status: "stopped", reason: "The requested system action was denied." } : current);
+      }
+    } catch (error) {
+      setConnectionError(error instanceof Error ? error.message : "The approval decision could not be saved.");
+    }
+  }, [sendMessage]);
 
   // Ask a separate fast model whether the goal condition is met, based only on
   // the recent visible conversation. Failures are non-fatal: the loop simply
   // continues so a flaky check never strands an in-progress goal.
-  const evaluateGoal = useCallback(async (condition: string): Promise<{ met: boolean; reason: string }> => {
+  const evaluateGoal = useCallback(async (condition: string, latestResult?: string): Promise<{ met: boolean; reason: string }> => {
     try {
-      const transcript = messagesRef.current
+      const visibleTranscript = messagesRef.current
         .filter((item) => item.text && !item.streaming)
         .slice(-12)
         .map((item) => `${item.role === "user" ? "User" : agentName}: ${stripInlinedAttachments(item.text).slice(0, 1200)}`)
         .join("\n\n");
+      const transcript = [
+        visibleTranscript,
+        latestResult?.trim() ? `Latest private continuation result:\n${latestResult.trim().slice(0, 2400)}` : "",
+      ].filter(Boolean).join("\n\n");
       const response = await fetch("/api/goal/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2634,27 +2946,58 @@ function Workspace() {
   const stopGoal = useCallback(() => {
     goalActiveRef.current = false;
     requestAbortRef.current?.abort();
-    setGoal((current) => current && current.status === "running" ? { ...current, status: "stopped", reason: "Stopped." } : current);
+    setGoal((current) => current && (current.status === "running" || current.status === "waiting") ? { ...current, status: "stopped", reason: "Stopped." } : current);
   }, []);
 
   // The inner loop: run a turn, have a separate model check the condition, and
   // either finish or feed the reason back as guidance for the next turn.
-  const runGoal = useCallback(async (condition: string) => {
+  const runGoal = useCallback(async (condition: string, options?: GoalRunOptions) => {
     if (goalActiveRef.current) return;
     goalActiveRef.current = true;
     setConnectionError("");
     setGoal({ condition, turns: 0, reason: "Starting…", status: "running" });
     let turns = 0;
-    let directive = `Work toward this goal until it is fully met, taking whatever steps are needed: ${condition}`;
+    let directive = options?.initialDirective ?? `Work toward this goal until it is fully met, taking whatever steps are needed: ${condition}`;
+    let latestHiddenResult = "";
+    const publishHiddenResult = (text: string) => {
+      const clean = text.trim();
+      if (!clean) return;
+      const id = createId("assistant");
+      const createdAt = Date.now();
+      setMessages((current) => [...current, { id, role: "assistant", text: clean, createdAt }]);
+      void persistAssistantMessage(id, clean, createdAt);
+      latestHiddenResult = "";
+    };
+    const finishTaskCard = (status: TaskProgressView["status"]) => {
+      setMessages((current) => {
+        const index = current.findLastIndex((item) => item.task?.goal === condition);
+        return index < 0 ? current : current.map((item, itemIndex) => itemIndex === index && item.task
+          ? { ...item, task: { ...item.task, status } }
+          : item);
+      });
+    };
     try {
       while (goalActiveRef.current && turns < GOAL_MAX_TURNS) {
-        await sendMessageRef.current?.(directive, { hidden: true, goalTurn: true });
+        const visibleFirstTurn = turns === 0 && options?.initialVisible === true;
+        const turnResult = await sendMessageRef.current?.(visibleFirstTurn ? condition : directive, {
+          hidden: !visibleFirstTurn,
+          goalTurn: true,
+          attachments: visibleFirstTurn ? options?.attachments : undefined,
+        }) ?? "";
+        if (!visibleFirstTurn && turnResult.trim()) latestHiddenResult = turnResult;
         turns += 1;
         if (!goalActiveRef.current) break;
+        if (approvalPendingRef.current) {
+          setGoal({ condition, turns, reason: "Waiting for your decision in the approval card.", status: "waiting" });
+          goalActiveRef.current = false;
+          return;
+        }
         setGoal((current) => current ? { ...current, turns, reason: "Checking the goal…" } : current);
-        const verdict = await evaluateGoal(condition);
+        const verdict = await evaluateGoal(condition, turnResult);
         if (!goalActiveRef.current) break;
         if (verdict.met) {
+          publishHiddenResult(latestHiddenResult);
+          finishTaskCard("done");
           setGoal({ condition, turns, reason: verdict.reason, status: "achieved" });
           goalActiveRef.current = false;
           return;
@@ -2663,14 +3006,20 @@ function Workspace() {
         directive = `The goal is not met yet. Evaluator feedback: ${verdict.reason}. Keep working toward this goal: ${condition}`;
       }
       if (goalActiveRef.current) {
+        publishHiddenResult(latestHiddenResult);
+        finishTaskCard("error");
         setGoal((current) => current ? { ...current, status: "capped", reason: `Stopped after ${turns} turns without meeting the goal.` } : current);
       }
     } catch {
+      publishHiddenResult(latestHiddenResult);
+      finishTaskCard("error");
       setGoal((current) => current ? { ...current, status: "stopped", reason: "The goal run hit an error." } : current);
     } finally {
       goalActiveRef.current = false;
     }
-  }, [evaluateGoal]);
+  }, [evaluateGoal, persistAssistantMessage]);
+
+  useEffect(() => { runGoalRef.current = runGoal; }, [runGoal]);
 
   // Composer entry point: intercept /goal commands, otherwise send normally. A
   // manual message during an active goal hands control back to the user.
@@ -2693,8 +3042,14 @@ function Workspace() {
       stopGoal();
       setGoal(null);
     }
+    if (settings.persistentTasks && shouldPersistTask(trimmed)) {
+      setInput("");
+      if (submitAttachments.length) setAttachments([]);
+      void runGoal(trimmed, { initialVisible: true, attachments: submitAttachments });
+      return;
+    }
     void sendMessage(text, { attachments: submitAttachments });
-  }, [runGoal, sendMessage, stopGoal]);
+  }, [runGoal, sendMessage, settings.persistentTasks, stopGoal]);
 
   useEffect(() => {
     if (!sessionId || isBusy || runningConversations.includes(sessionId)) return;
@@ -3754,6 +4109,14 @@ function Workspace() {
                       durationMs={message.thinkingMs}
                     />
                   ) : null}
+                  {message.role === "assistant" && message.task ? (
+                    <TaskProgressCard
+                      task={message.task}
+                      approvalPolicy={settings.approvalPolicy}
+                      onApproval={decideApproval}
+                      onPolicyChange={changeApprovalPolicy}
+                    />
+                  ) : null}
                   {message.role === "assistant" && message.subagents?.length ? (
                     <div className="subagent-list">
                       {message.subagents.map((run) => <SubAgentCard key={run.id} run={run} />)}
@@ -3919,13 +4282,14 @@ function Workspace() {
               <div className="goal-copy">
                 <strong>
                   {goal.status === "running" ? `Goal active · turn ${goal.turns}/${GOAL_MAX_TURNS}`
+                    : goal.status === "waiting" ? "Goal paused for approval"
                     : goal.status === "achieved" ? "Goal achieved"
                     : goal.status === "capped" ? "Goal stopped · turn limit"
                     : "Goal stopped"}
                 </strong>
-                <small>{goal.status === "running" ? goal.condition : goal.reason}</small>
+                  <small>{goal.status === "running" ? goal.condition : goal.reason}</small>
               </div>
-              {goal.status === "running"
+              {goal.status === "running" || goal.status === "waiting"
                 ? <button type="button" className="goal-stop" onClick={stopGoal}>Stop</button>
                 : <button type="button" className="goal-stop" onClick={() => setGoal(null)} aria-label="Dismiss goal">×</button>}
             </div>

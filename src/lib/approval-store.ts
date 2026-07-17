@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { ApprovalPolicy } from "./app-types";
 
 // Durable approval ledger + session grants. Destructive actions (delete, move,
 // overwrite, run a command) still require the owner's approval, but instead of a
@@ -22,6 +23,9 @@ export type ToolRisk = "low" | "medium" | "high";
 // the owner (what can be granted for a session) and the runtime, and tags the
 // audit trail with a risk level.
 export const GUARDED_TOOLS: Record<string, ToolRisk> = {
+  create_directory: "low",
+  edit_file: "medium",
+  venice_api: "high",
   delete_path: "high",
   run_command: "high",
   write_file: "medium",
@@ -36,6 +40,13 @@ export function guardedToolList(): { tool: string; risk: ToolRisk }[] {
   return Object.entries(GUARDED_TOOLS).map(([tool, risk]) => ({ tool, risk }));
 }
 
+export function approvalPolicyDecision(policy: ApprovalPolicy, risk: ToolRisk): "auto" | "ask" | "deny" {
+  if (policy === "never_allow") return "deny";
+  if (policy === "always_allow") return "auto";
+  if (policy === "risk_based" && risk === "low") return "auto";
+  return "ask";
+}
+
 export interface ApprovalRecord {
   id: string;
   conversationId: string;
@@ -47,6 +58,8 @@ export interface ApprovalRecord {
   createdAt: string;
   decidedAt?: string;
   decidedBy?: string;
+  /** Set when an approved once-only decision has been used by the runtime. */
+  consumedAt?: string;
 }
 
 export interface SessionGrant {
@@ -116,6 +129,13 @@ export async function recordApprovalRequest(input: { conversationId: string; too
   };
   return serial(async () => {
     const store = await read();
+    const existing = [...store.records].reverse().find((entry) => (
+      entry.conversationId === input.conversationId
+      && entry.tool === input.tool
+      && entry.summary === record.summary
+      && entry.status === "pending"
+    ));
+    if (existing) return existing;
     store.records.push(record);
     await write(store);
     return record;
@@ -154,6 +174,29 @@ export async function resolveApprovalRequest(id: string, status: Exclude<Approva
     record.status = status;
     record.decidedAt = new Date().toISOString();
     record.decidedBy = decidedBy;
+    await write(store);
+    return record;
+  });
+}
+
+/**
+ * Consume one matching owner-approved request. This bridges the approval button
+ * back to the retried tool call without turning a one-time decision into a
+ * broad session grant.
+ */
+export async function consumeApprovedRequest(conversationId: string, tool: string, summary: string): Promise<ApprovalRecord | undefined> {
+  return serial(async () => {
+    const store = await read();
+    const record = [...store.records].reverse().find((entry) => (
+      entry.conversationId === conversationId
+      && entry.tool === tool
+      && entry.summary === summary.slice(0, 300)
+      && entry.status === "approved"
+      && entry.scope === "once"
+      && !entry.consumedAt
+    ));
+    if (!record) return undefined;
+    record.consumedAt = new Date().toISOString();
     await write(store);
     return record;
   });

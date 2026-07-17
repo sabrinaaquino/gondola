@@ -58,6 +58,7 @@ export async function POST(request: Request) {
   };
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
       const emit = (event: Record<string, unknown>) => {
         if (closed) return;
         try {
@@ -73,6 +74,7 @@ export async function POST(request: Request) {
       void (async () => {
         try {
           emit({ type: "agent_start" });
+          heartbeat = setInterval(() => emit({ type: "heartbeat", at: Date.now(), status: "Still working" }), 7_500);
           // Route interactive turns through the shared run queue. `interrupt`
           // gives the live user barge-in over any in-flight turn for this
           // session (e.g. an ambient or scheduled turn) while still serializing.
@@ -96,6 +98,7 @@ export async function POST(request: Request) {
           const publicError = toPublicError(error);
           emit({ type: "error", ...publicError });
         } finally {
+          if (heartbeat) clearInterval(heartbeat);
           request.signal.removeEventListener("abort", abortTurn);
           if (!closed) {
             closed = true;

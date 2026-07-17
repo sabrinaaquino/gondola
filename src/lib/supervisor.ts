@@ -127,6 +127,8 @@ export interface SupervisorRecoveryResult {
   category: FailureCategory;
   /** The recovery strategy that was chosen, for the Lab / runtime record. */
   strategy: RecoveryStrategy;
+  /** Safe for the client to continue from durable state without user prompting. */
+  autoResume?: boolean;
 }
 
 // A quick, non-reasoning model for the recovery attempt. Deliberately a
@@ -169,7 +171,7 @@ function recoveryMessage(diagnosis: FailureDiagnosis, strategy: RecoveryStrategy
     return `${reason}, but your ${count} queued ${jobs} still tracked and I'm re-checking them - they'll land here as they finish. ${diagnosis.suggestion}`;
   }
   if (strategy === "resume_point" && input.lastCheckpoint) {
-    return `${base} I got as far as "${input.lastCheckpoint.label}", so I can pick up from there - just say continue.`;
+    return `${base} I preserved progress through "${input.lastCheckpoint.label}" and will resume from that checkpoint automatically.`;
   }
   return base;
 }
@@ -196,7 +198,7 @@ export async function runSupervisorRecovery(input: SupervisorRecoveryInput): Pro
       if (answer && !input.signal?.aborted) {
         input.emit({ type: "text_delta", delta: RECOVERY_LEAD_IN });
         input.emit({ type: "text_delta", delta: answer });
-        input.emit({ type: "recovery", recovered: true, category: diagnosis.category });
+        input.emit({ type: "recovery", recovered: true, category: diagnosis.category, strategy });
         return { text: `${RECOVERY_LEAD_IN}${answer}`, recovered: true, category: diagnosis.category, strategy };
       }
     } catch {
@@ -207,6 +209,7 @@ export async function runSupervisorRecovery(input: SupervisorRecoveryInput): Pro
   if (input.signal?.aborted) return { text: "", recovered: false, category: diagnosis.category, strategy };
   const message = recoveryMessage(diagnosis, strategy, input);
   input.emit({ type: "text_delta", delta: message });
-  input.emit({ type: "recovery", recovered: false, category: diagnosis.category });
-  return { text: message, recovered: false, category: diagnosis.category, strategy };
+  const autoResume = strategy === "resume_point" && Boolean(input.lastCheckpoint);
+  input.emit({ type: "recovery", recovered: false, category: diagnosis.category, strategy, autoResume });
+  return { text: message, recovered: false, category: diagnosis.category, strategy, autoResume };
 }

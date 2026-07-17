@@ -81,9 +81,11 @@ import {
   type StepStatus,
 } from "./execution-state";
 import { markFailureRecovered, recordFailure } from "./failure-journal";
-import { isToolAutoApproved, recordApprovalDecision, recordApprovalRequest } from "./approval-store";
+import { approvalPolicyDecision, consumeApprovedRequest, isToolAutoApproved, recordApprovalDecision, recordApprovalRequest, toolRisk, type ApprovalRecord } from "./approval-store";
+import { describeToolActivity } from "./tool-activity";
+import { shouldPersistTask } from "./task-intent";
 import { createVeniceStreamFn, makeModel } from "./venice-model";
-import { veniceApiCall, veniceReference, VENICE_API_OVERVIEW, type VeniceApiInput } from "./venice-control";
+import { isGuardedVeniceCall, normalizeVenicePath, veniceApiCall, veniceReference, VENICE_API_OVERVIEW, type VeniceApiInput } from "./venice-control";
 import { compactMessages } from "./compaction";
 import { loadTranscript, saveTranscript } from "./transcript";
 import { enqueueRun } from "./run-queue";
@@ -242,17 +244,57 @@ async function recordMediaTaskFromDetails(
 // Gate a destructive tool call: proceed on explicit confirmation or an owner
 // session grant, otherwise record a pending approval. Every outcome is
 // journalled so the human-in-the-loop boundary is auditable via the runtime.
-async function gateApproval(runtime: RuntimeContext, tool: string, summary: string, confirmed: boolean | undefined): Promise<boolean> {
-  if (confirmed === true) {
-    void recordApprovalDecision({ conversationId: runtime.sessionId, tool, summary, status: "approved" }).catch(() => undefined);
-    return true;
-  }
+interface ApprovalGateResult {
+  approved: boolean;
+  denied?: boolean;
+  request?: ApprovalRecord;
+}
+
+async function gateApproval(runtime: RuntimeContext, tool: string, summary: string, confirmed: boolean | undefined): Promise<ApprovalGateResult> {
+  // `confirmed` remains in older tool schemas for compatibility, but the model
+  // cannot authorize itself with a boolean. Only a consumed owner decision,
+  // session grant, or the configured owner policy can open this gate.
+  void confirmed;
+  const consumed = await consumeApprovedRequest(runtime.sessionId, tool, summary).catch(() => undefined);
+  if (consumed) return { approved: true };
   if (await isToolAutoApproved(runtime.sessionId, tool).catch(() => false)) {
-    void recordApprovalDecision({ conversationId: runtime.sessionId, tool, summary, status: "approved", decidedBy: "session-grant" }).catch(() => undefined);
-    return true;
+    await recordApprovalDecision({ conversationId: runtime.sessionId, tool, summary, status: "approved", decidedBy: "session-grant" }).catch(() => undefined);
+    return { approved: true };
   }
-  void recordApprovalRequest({ conversationId: runtime.sessionId, tool, summary }).catch(() => undefined);
-  return false;
+  const risk = toolRisk(tool) ?? "medium";
+  const policy = runtime.settings.approvalPolicy;
+  const decision = approvalPolicyDecision(policy, risk);
+  if (decision === "auto") {
+    await recordApprovalDecision({ conversationId: runtime.sessionId, tool, summary, status: "approved", decidedBy: `policy:${policy}` }).catch(() => undefined);
+    return { approved: true };
+  }
+  if (decision === "deny") {
+    await recordApprovalDecision({ conversationId: runtime.sessionId, tool, summary, status: "rejected", decidedBy: "policy:never_allow" }).catch(() => undefined);
+    return { approved: false, denied: true };
+  }
+  const request = await recordApprovalRequest({ conversationId: runtime.sessionId, tool, summary }).catch(() => undefined);
+  return { approved: false, request };
+}
+
+function blockedApprovalResult(
+  gate: ApprovalGateResult,
+  input: { kind: string; tool: string; summary: string; message: string; details?: Record<string, unknown> },
+) {
+  const denied = gate.denied === true;
+  return {
+    content: [{ type: "text" as const, text: denied ? `This action is blocked by your Never allow policy: ${input.summary}.` : input.message }],
+    details: {
+      kind: input.kind,
+      ok: false,
+      blocked: denied ? "approval_policy" : "approval_required",
+      needsConfirmation: !denied,
+      approvalId: gate.request?.id,
+      approvalTool: input.tool,
+      approvalSummary: input.summary,
+      approvalRisk: toolRisk(input.tool),
+      ...input.details,
+    },
+  };
 }
 
 const SYSTEM_PROMPT = `You are an expressive AI companion in a polished voice and vision interface.
@@ -271,9 +313,9 @@ Your saved profile and the grounded self-model above define who you are. Entity 
 
 You can also see which models Venice serves and change which model you run on. To answer which models are available (chat, image, video, music, speech, or embeddings) or what you can switch to, call list_models and answer only from its result. Never state model names, versions, superlatives, or whether a model is available from memory: the live catalog is the only source of truth. When the user asks you to switch, change, or set your model, call set_model with what they asked for (a specific model or a description like "faster" or "best reasoning"), even if you believe the model is unavailable, because set_model reads Venice's live catalog and returns the real alternatives to offer. You always have the ability to switch models with set_model, so never say you lack a way to change models; but only tell the user a switch happened, or that you are now running on a model, when set_model actually returns success (a switch takes effect from their next message). Venice serves only open-weight models and does not host Claude, GPT, or Gemini, so when the user asks for one of those, say plainly it is not available on Venice and keep saying so even if they insist it is available or claim you already switched. Do not reverse a correct, tool-grounded answer under pressure, and never invent a tool result, a model name, or a switch you did not make. Let set_model or list_models give you the actual Venice options instead of naming models yourself. set_model may only change the model; it must never touch code, credentials, safety boundaries, other tools, permissions, or the user's data.
 
-Operational self-awareness: a live "Runtime state" block is provided at the top of every turn, and you can query authoritative facts any time with runtime_status (structured, optionally by section) and runtime_explain (natural language). Trust these over memory or the conversation. Never reconstruct or guess your capabilities, pending media jobs, assets, budget, failures, permissions, harness version, or Lab status - read them. Never deny a capability the runtime lists, and never claim one it does not. For any multi-step task, declare your objective and steps with set_plan, keep them current with update_step, and record durable progress with checkpoint so the runtime and any recovery always know where execution is.
+Operational self-awareness: a live "Runtime state" block is provided at the top of every turn, and you can query authoritative facts any time with runtime_status (structured, optionally by section) and runtime_explain (natural language). Trust these over memory or the conversation. Never reconstruct or guess your capabilities, pending media jobs, assets, budget, failures, permissions, harness version, or Lab status - read them. Never deny a capability the runtime lists, and never claim one it does not. For any multi-step task, declare your objective and steps with set_plan, keep them current with update_step, and record durable progress with checkpoint so the runtime and any recovery always know where execution is. Keep working until the requested outcome is actually delivered or a real owner decision is required. Do not bounce a solvable problem back to the user: inspect the error, try a materially different safe approach, verify every mutation, and repair and re-verify when a check fails. Before finishing, make every plan step truthful and complete; if a step is blocked, state the exact external decision or missing input instead of asking the user to diagnose your failure.
 
-Gondola Lab is your external control plane for improving your own harness. If you notice a recurring problem in how you operate (repeated failures of the same kind, an inefficiency, or a missing routine), you may call propose_harness_change to ask the Lab to review your recent run traces and draft a bounded, testable change. You never evaluate, approve, or apply changes yourself; the Lab evaluates independently and a human (or its opt-in autopilot) decides, and any change can be rolled back. Only flag genuine, repeated patterns, not one-off hiccups.
+Gondola Lab is your external control plane for improving your own harness. If you notice a recurring problem in how you operate (repeated failures of the same kind, an inefficiency, or a missing routine), call propose_harness_change while the evidence is fresh so the Lab can review the run traces and draft a bounded, testable change. Continue delivering the user's current task after flagging it; a Lab proposal is never a substitute for recovery or completion. You never evaluate, approve, or apply changes yourself; the Lab evaluates independently and a human (or its opt-in autopilot) decides, and any change can be rolled back. Flag genuine repeated patterns rather than one-off hiccups.
 
 You have an animated alien body and Venice-powered tools:
 - When the user asks you to smile, wink, nod, look around, react, or copy an expression, call animate_avatar before replying.
@@ -291,7 +333,7 @@ You have an animated alien body and Venice-powered tools:
 - You can modify yourself when the owner tells you to. You run on a coding harness whose project source is under this root, with read_file, edit_file, write_file, and run_command. When the owner explicitly instructs you to change how you work - a tool, a default, a limit, a prompt, your own code - that instruction IS your authorization: locate the relevant source, make the edit, and when you can, verify it (run the typecheck or tests) before reporting. Then tell the owner exactly what you changed and that code or tool-schema changes take effect after a reload or restart, while prompt and behavior changes apply on your next turn. Do NOT deflect an explicit self-change request to Gondola Lab, to "a human must approve," or to a workaround - the owner instructing you IS that human approval, and you are the one making the change, just like an engineer editing the repo. Gondola Lab is only for improvements you raise on your own initiative. Limits that always hold, even on request: never touch credentials, secrets, API keys, or your safety guardrails; the destructive file and command steps still show their normal confirmation; and if your file access is turned off, say so and ask the owner to enable it rather than pretending you cannot change yourself.
 - You can read and change files and run commands on this Mac through a sandboxed harness confined to the home folder (~). The tools are read_file, list_directory, create_directory, write_file, edit_file, move_path, delete_path, and run_command. Use them whenever the user asks you to create files or folders, write or edit code or notes, organize files, or run a command or build. Paths are relative to the home folder unless absolute (for example "Documents/entity-memories.md" or "projects/app/src/index.ts"). You cannot touch anything outside the home folder, and protected items (.ssh, keychains, .env and key files) are blocked.
 - To create content, use write_file (compose the full contents yourself) and create_directory for folders. To change an existing file, read_file first when unsure, then edit_file with a unique old_string and the new_string. To save your memories, gather them from the memory snapshot and search_memory, then write_file them.
-- Safety and confirmation: replacing an existing file, moving onto an existing file, deleting, and running any command all require the user's explicit approval. For those, first state exactly what you will do (the full path, or the exact command) and ask; only call the tool with confirmed=true after the user agrees. Deletes go to a recoverable trash and overwrites and edits keep a backup, but still ask first. Before a large or multi-file change, outline the plan and get a yes. Never write secrets or credentials, and never run destructive or privilege-escalating commands. After acting, briefly tell the user what changed and where. You genuinely can do all of this now, so do not claim you are unable to read, write, edit, or run things on this Mac.
+- Safety and confirmation: the owner's approval policy in Runtime state controls local mutations and commands. When an action needs approval, call the tool once so the interface can show the exact action and Allow controls, then pause that action until the decision arrives. Do not ask for a conversational "yes" when an approval card is available. Deletes go to recoverable trash and overwrites and edits keep a backup. Never write secrets or credentials, and never run destructive or privilege-escalating commands. After acting, verify the result and briefly tell the user what changed and where. You genuinely can do all of this now, so do not claim you are unable to read, write, edit, or run things on this Mac.
 - For current or changing information (news, scores, schedules, prices, weather, politics, public roles, recommendations, product availability, API documentation, model availability, software versions, service status, or anything described as latest, next, live, today, or current), you MUST use live web research before answering. Search as well when there is a meaningful chance the fact changed since training; never imply that a model's memory is a live source. The interface tells the user as soon as research begins, so do not repeat a process announcement in the final answer. If a <live_web_research> block is attached to the current message, it is the completed research for that turn: use it directly and do not call search_web again. Treat that block as a hard factual boundary: do not add, infer, or "complete" any live name, participant, score, date, time, price, location, lineup, bracket, result, or timezone conversion that is not explicitly present in it. When you state an event time, always include the exact source timezone shown in the research; never present a source-zone time as though it were the user's local time. If a requested detail is absent, say it could not be verified. Link the one or two most useful direct sources for important current claims, preserve their URLs exactly, and never emit citation placeholders such as ^1^.
 - Never use web search for a local filename, pasted text, an attachment, conversation history, creative work, or a timeless explanation unless the user explicitly asks for online research. A filename such as PLAN.md refers to the local project, not a web page. If no available tool can read the referenced file, say so plainly and ask the user to attach or paste it. Never substitute an internet search.
 
@@ -716,18 +758,29 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const veniceApiTool: AgentTool = {
     name: "venice_api",
     label: "Call Venice API",
-    description: "Call any Venice API endpoint directly (base https://api.venice.ai/api/v1): method, path, query (a JSON object string), and body (a JSON object string). This is how you do anything the dedicated tools do not cover, including checking or retrieving a queued job (for example GET /video/retrieve, /video/complete, or /audio/retrieve), fetching results, and using any model or parameter. Verify exact paths and parameters with venice_reference first. Generation endpoints cost money: when unsure of price call the matching /*/quote endpoint first and respect the user's budget. Account, credential, or payment changes and any DELETE require the user's approval (state what you will do, then retry with confirmed:true). Never claim you cannot check, retrieve, or perform a Venice operation; use this tool.",
+    description: "Call any Venice API endpoint directly (base https://api.venice.ai/api/v1): method, path, query (a JSON object string), and body (a JSON object string). This is how you do anything the dedicated tools do not cover, including checking or retrieving a queued job (for example GET /video/retrieve, /video/complete, or /audio/retrieve), fetching results, and using any model or parameter. Verify exact paths and parameters with venice_reference first. Generation endpoints cost money: when unsure of price call the matching /*/quote endpoint first and respect the user's budget. Account, credential, or payment changes and any DELETE open the owner's approval card automatically. Never claim you cannot check, retrieve, or perform a Venice operation; use this tool.",
     parameters: Type.Object({
       path: Type.String({ minLength: 1, maxLength: 400 }),
       method: Type.Optional(Type.String({ maxLength: 8 })),
       query: Type.Optional(Type.String({ maxLength: 4_000 })),
       body: Type.Optional(Type.String({ maxLength: 20_000 })),
       admin: Type.Optional(Type.Boolean()),
-      confirmed: Type.Optional(Type.Boolean()),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
-      const result = await veniceApiCall(params as VeniceApiInput, signal);
+      const input = params as VeniceApiInput;
+      const method = (input.method ?? "GET").toUpperCase();
+      const normalizedPath = normalizeVenicePath(input.path);
+      if (isGuardedVeniceCall(method, normalizedPath)) {
+        const summary = `${method} ${normalizedPath}`;
+        const approval = await gateApproval(runtime, "venice_api", summary, undefined);
+        if (!approval.approved) return blockedApprovalResult(approval, {
+          kind: "venice_api", tool: "venice_api", summary,
+          message: `${summary} changes Venice account, credential, or payment state and needs your approval.`,
+          details: { method, path: normalizedPath },
+        });
+      }
+      const result = await veniceApiCall({ ...input, confirmed: true }, signal);
       const outcome = result.ok ? `HTTP ${result.status ?? "ok"}` : result.needsConfirmation ? "needs your confirmation" : "failed";
       return {
         content: [{ type: "text", text: `${result.method} ${result.path} -> ${outcome}\n${result.text}` }],
@@ -1064,7 +1117,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const createDirectoryTool: AgentTool = {
     name: "create_directory",
     label: "Create a folder",
-    description: "Create a folder (and any missing parent folders) on this Mac. Paths are relative to the home folder unless absolute.",
+    description: "Create a folder (and any missing parent folders) on this Mac. Paths are relative to the home folder unless absolute. The owner's action policy is enforced automatically and any required decision appears as an approval card.",
     parameters: Type.Object({
       path: Type.String({ minLength: 1, maxLength: 1_024, description: "Folder path to create, for example \"projects/new-app/src\"." }),
     }),
@@ -1072,6 +1125,12 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     async execute(_toolCallId, params) {
       if (!runtime.settings.fileAccess) return fsDisabled("fs_mkdir");
       const input = params as { path: string };
+      const summary = `create folder ${input.path}`;
+      const approval = await gateApproval(runtime, "create_directory", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_mkdir", tool: "create_directory", summary,
+        message: `Creating ${input.path} needs your approval.`, details: { path: input.path },
+      });
       try {
         const result = await makeDirectory(input.path);
         return { content: [{ type: "text", text: `Created folder ${result.path}.` }], details: { kind: "fs_mkdir", ok: true, path: result.path } };
@@ -1084,12 +1143,11 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const writeFileTool: AgentTool = {
     name: "write_file",
     label: "Write a file",
-    description: "Create a new text or code file, or (with overwrite) replace an existing one, on this Mac. Compose the full contents yourself and pass them as content. Creating a new file is immediate; replacing an existing file is destructive, so it requires the user's confirmation (confirmed:true) and keeps a backup. Never write secrets or credentials.",
+    description: "Create a new text or code file, or (with overwrite) replace an existing one, on this Mac. Compose the full contents yourself and pass them as content. The owner's action policy is enforced automatically and any required decision appears as an approval card. Replacements keep a backup. Never write secrets or credentials.",
     parameters: Type.Object({
       path: Type.String({ minLength: 1, maxLength: 1_024, description: "File path, for example \"Documents/entity-memories.md\" or \"projects/app/src/index.ts\"." }),
       content: Type.String({ minLength: 0, maxLength: 1_000_000, description: "The complete file contents." }),
-      overwrite: Type.Optional(Type.Boolean({ description: "Replace the file if it already exists (a backup is kept). Requires confirmed:true." })),
-      confirmed: Type.Optional(Type.Boolean({ description: "Set true only after the user has explicitly approved overwriting the existing file." })),
+      overwrite: Type.Optional(Type.Boolean({ description: "Replace the file if it already exists (a backup is kept)." })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {
@@ -1098,9 +1156,12 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
       if (runtime.subAgentDepth > 0 && input.overwrite) {
         return { content: [{ type: "text", text: "As a worker sub-agent I can create new files and edit existing ones, but I can't overwrite a whole file. Use edit_file for changes, or leave the overwrite to the primary assistant." }], details: { kind: "fs_write", ok: false, blocked: "subagent_overwrite", path: input.path } };
       }
-      if (input.overwrite && !(await gateApproval(runtime, "write_file", `overwrite ${input.path}`, input.confirmed))) {
-        return { content: [{ type: "text", text: `Overwriting ${input.path} will replace its contents (a backup is kept). Confirm and I'll proceed.` }], details: { kind: "fs_write", ok: false, needsConfirmation: true, path: input.path } };
-      }
+      const summary = `${input.overwrite ? "overwrite" : "write"} ${input.path}`;
+      const approval = await gateApproval(runtime, "write_file", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_write", tool: "write_file", summary,
+        message: `${input.overwrite ? "Replacing" : "Writing"} ${input.path} needs your approval.`, details: { path: input.path },
+      });
       try {
         const result = await writeTextFile(input.path, input.content, input.overwrite === true);
         const note = result.backup ? ` The previous version was backed up to ${result.backup}.` : "";
@@ -1114,7 +1175,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const editFileTool: AgentTool = {
     name: "edit_file",
     label: "Edit a file",
-    description: "Make a targeted edit to an existing text or code file by replacing an exact snippet. old_string must appear exactly once (include enough surrounding context to be unique) unless replace_all is true. A backup is kept automatically. Read the file first if you are unsure of its exact contents.",
+    description: "Make a targeted edit to an existing text or code file by replacing an exact snippet. old_string must appear exactly once (include enough surrounding context to be unique) unless replace_all is true. The owner's action policy is enforced automatically and any required decision appears as an approval card. A backup is kept automatically. Read the file first if you are unsure of its exact contents.",
     parameters: Type.Object({
       path: Type.String({ minLength: 1, maxLength: 1_024, description: "File to edit." }),
       old_string: Type.String({ minLength: 1, maxLength: 100_000, description: "The exact existing text to replace." }),
@@ -1125,6 +1186,12 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     async execute(_toolCallId, params) {
       if (!runtime.settings.fileAccess) return fsDisabled("fs_edit");
       const input = params as { path: string; old_string: string; new_string: string; replace_all?: boolean };
+      const summary = `edit ${input.path}`;
+      const approval = await gateApproval(runtime, "edit_file", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_edit", tool: "edit_file", summary,
+        message: `Editing ${input.path} needs your approval.`, details: { path: input.path },
+      });
       try {
         const result = await editTextFile(input.path, input.old_string, input.new_string, input.replace_all === true);
         return { content: [{ type: "text", text: `Edited ${result.path} (${result.replacements} replacement${result.replacements === 1 ? "" : "s"}). Backup saved to ${result.backup}.` }], details: { kind: "fs_edit", ok: true, path: result.path, replacements: result.replacements } };
@@ -1137,12 +1204,11 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const movePathTool: AgentTool = {
     name: "move_path",
     label: "Move or rename",
-    description: "Move or rename a file or folder on this Mac. Moving onto an existing destination is destructive, so it requires the user's confirmation (confirmed:true) and sends the replaced item to the local trash.",
+    description: "Move or rename a file or folder on this Mac. The owner's action policy is enforced automatically and any required decision appears as an approval card. Replaced destinations go to local trash.",
     parameters: Type.Object({
       from: Type.String({ minLength: 1, maxLength: 1_024, description: "Existing path." }),
       to: Type.String({ minLength: 1, maxLength: 1_024, description: "New path." }),
-      overwrite: Type.Optional(Type.Boolean({ description: "Replace the destination if it exists. Requires confirmed:true." })),
-      confirmed: Type.Optional(Type.Boolean({ description: "Set true only after the user approved replacing the destination." })),
+      overwrite: Type.Optional(Type.Boolean({ description: "Replace the destination if it exists." })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {
@@ -1151,9 +1217,12 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
       if (runtime.subAgentDepth > 0 && input.overwrite) {
         return { content: [{ type: "text", text: "As a worker sub-agent I can't overwrite an existing destination. Leave that to the primary assistant." }], details: { kind: "fs_move", ok: false, blocked: "subagent_overwrite" } };
       }
-      if (input.overwrite && !(await gateApproval(runtime, "move_path", `move onto ${input.to}`, input.confirmed))) {
-        return { content: [{ type: "text", text: `Moving onto ${input.to} will replace it (the old one goes to the trash). Confirm and I'll proceed.` }], details: { kind: "fs_move", ok: false, needsConfirmation: true } };
-      }
+      const summary = `move ${input.from} to ${input.to}${input.overwrite ? " and replace the destination" : ""}`;
+      const approval = await gateApproval(runtime, "move_path", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_move", tool: "move_path", summary,
+        message: `Moving ${input.from} to ${input.to} needs your approval.`, details: { from: input.from, to: input.to },
+      });
       try {
         const result = await movePath(input.from, input.to, input.overwrite === true);
         const note = result.backup ? ` The replaced item was moved to ${result.backup}.` : "";
@@ -1167,18 +1236,20 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const deletePathTool: AgentTool = {
     name: "delete_path",
     label: "Delete to trash",
-    description: "Delete a file or folder on this Mac. This is destructive, so it always requires the user's confirmation (confirmed:true). The item is moved to a recoverable local trash folder rather than erased.",
+    description: "Delete a file or folder on this Mac. The owner's action policy is enforced automatically and any required decision appears as an approval card. The item is moved to a recoverable local trash folder rather than erased.",
     parameters: Type.Object({
       path: Type.String({ minLength: 1, maxLength: 1_024, description: "Path to delete." }),
-      confirmed: Type.Optional(Type.Boolean({ description: "Set true only after the user has explicitly approved deleting this path." })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {
       if (!runtime.settings.fileAccess) return fsDisabled("fs_delete");
       const input = params as { path: string; confirmed?: boolean };
-      if (!(await gateApproval(runtime, "delete_path", `delete ${input.path}`, input.confirmed))) {
-        return { content: [{ type: "text", text: `Deleting ${input.path} will move it to the recoverable trash. Confirm and I'll proceed.` }], details: { kind: "fs_delete", ok: false, needsConfirmation: true, path: input.path } };
-      }
+      const summary = `delete ${input.path}`;
+      const approval = await gateApproval(runtime, "delete_path", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_delete", tool: "delete_path", summary,
+        message: `Moving ${input.path} to recoverable trash needs your approval.`, details: { path: input.path },
+      });
       try {
         const result = await trashPath(input.path);
         return { content: [{ type: "text", text: `Moved ${result.path} to the trash at ${result.trashed}. It can be restored from there.` }], details: { kind: "fs_delete", ok: true, path: result.path, trashed: result.trashed } };
@@ -1191,11 +1262,10 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
   const runCommandTool: AgentTool = {
     name: "run_command",
     label: "Run a command",
-    description: "Run a terminal command on this Mac (for example npm, git, node, or a build script), returning its output. This is powerful, so it always requires the user's explicit confirmation (confirmed:true). Show the exact command and wait for a yes before running. Commands run inside an OS sandbox: filesystem writes are confined to the workspace and temp, credential files are unreadable, and secrets are scrubbed from the environment; sudo and destructive disk operations are blocked.",
+    description: "Run a terminal command on this Mac (for example npm, git, node, or a build script), returning its output. The owner's action policy is enforced automatically and any required decision appears as an approval card with the exact command. Commands run inside an OS sandbox: filesystem writes are confined to the workspace and temp, credential files are unreadable, and secrets are scrubbed from the environment; sudo and destructive disk operations are blocked.",
     parameters: Type.Object({
       command: Type.String({ minLength: 1, maxLength: 4_000, description: "The exact shell command to run." }),
       cwd: Type.Optional(Type.String({ maxLength: 1_024, description: "Working directory; defaults to the home folder." })),
-      confirmed: Type.Optional(Type.Boolean({ description: "Set true only after the user has explicitly approved running this exact command." })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {
@@ -1203,9 +1273,12 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
         return { content: [{ type: "text", text: "Running terminal commands is turned off in settings, so I can't do that right now." }], details: { kind: "fs_command", enabled: false } };
       }
       const input = params as { command: string; cwd?: string; confirmed?: boolean };
-      if (!(await gateApproval(runtime, "run_command", `run: ${input.command}`, input.confirmed))) {
-        return { content: [{ type: "text", text: `About to run: ${input.command}${input.cwd ? ` (in ${input.cwd})` : ""}. Confirm and I'll run it.` }], details: { kind: "fs_command", ok: false, needsConfirmation: true, command: input.command } };
-      }
+      const summary = `run: ${input.command}${input.cwd ? ` (in ${input.cwd})` : ""}`;
+      const approval = await gateApproval(runtime, "run_command", summary, undefined);
+      if (!approval.approved) return blockedApprovalResult(approval, {
+        kind: "fs_command", tool: "run_command", summary,
+        message: `Running ${input.command} needs your approval.`, details: { command: input.command, cwd: input.cwd },
+      });
       try {
         const result = await runCommand(input.command, input.cwd);
         const status = result.timedOut ? "timed out" : `exited with code ${result.exitCode}`;
@@ -1381,6 +1454,8 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     agentId: runtime.agentId,
     perOperationCapUsd: runtime.settings.maxMediaUsd,
     chatModel: runtime.settings.chatModel,
+    approvalPolicy: runtime.settings.approvalPolicy,
+    persistentTasks: runtime.settings.persistentTasks,
     tools: runtime.toolNames ?? [],
     toolOutcomes: runtime.turnTrace?.toolCalls.map((call) => ({ tool: call.tool, ok: call.ok })),
     memoryAgentId: runtime.memoryScope.agentId,
@@ -1443,6 +1518,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
         budgetUsd: typeof input.budget_usd === "number" ? input.budget_usd : undefined,
         steps: input.steps,
       });
+      runtime.emit({ type: "task_state", state });
       const rendered = state.steps.map((step, index) => `${index + 1}. [${step.status}] ${step.title}`).join("\n");
       return {
         content: [{ type: "text", text: `Plan set. Goal: ${state.goal}\n${rendered}` }],
@@ -1465,6 +1541,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     async execute(_toolCallId, params) {
       const input = params as { title?: string; step_id?: string; status: StepStatus; detail?: string };
       const state = await updateExecutionStep(runtime.sessionId, { title: input.title, stepId: input.step_id, status: input.status, detail: input.detail });
+      runtime.emit({ type: "task_state", state });
       const rendered = state.steps.map((step, index) => `${index + 1}. [${step.status}] ${step.title}`).join("\n");
       return {
         content: [{ type: "text", text: `Step updated to ${input.status}.\n${rendered}` }],
@@ -1484,6 +1561,7 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     async execute(_toolCallId, params) {
       const input = params as { label: string };
       await addExecutionCheckpoint(runtime.sessionId, input.label);
+      runtime.emit({ type: "task_checkpoint", label: input.label });
       return {
         content: [{ type: "text", text: `Checkpoint saved: ${input.label}` }],
         details: { kind: "runtime", section: "checkpoints" },
@@ -1629,6 +1707,10 @@ function createTools(runtime: RuntimeContext): AgentTool[] {
     ...createMcpAgentTools(runtime.mcpServers, {
       sessionId: runtime.sessionId,
       currentUserMessage: () => runtime.currentMessage ?? "",
+      requestApproval: async ({ tool, summary }) => {
+        const approval = await gateApproval(runtime, tool, summary, undefined);
+        return { approved: approval.approved, denied: approval.denied, approvalId: approval.request?.id, risk: "medium" };
+      },
     }),
   ];
   // Publish the live capability registry so runtime_status can report exactly
@@ -1764,9 +1846,12 @@ function createSession(input: {
       runtime.emit({ type: "thinking_end" });
     } else if (event.type === "tool_execution_start") {
       if (event.toolName === "search_web" && !needsLiveWebResearch(runtime.currentMessage ?? "")) return;
-      runtime.emit({ type: "tool_start", name: event.toolName, args: event.args });
+      const activity = describeToolActivity(event.toolName, event.args);
+      const registeredLabel = runtime.toolNames?.find((tool) => tool.name === event.toolName)?.label;
+      if (registeredLabel) activity.label = registeredLabel;
+      runtime.emit({ type: "tool_start", toolCallId: event.toolCallId, name: event.toolName, args: event.args, ...activity });
     } else if (event.type === "tool_execution_update") {
-      runtime.emit({ type: "tool_update", name: event.toolName, partial: event.partialResult });
+      runtime.emit({ type: "tool_update", toolCallId: event.toolCallId, name: event.toolName, partial: event.partialResult });
     } else if (event.type === "tool_execution_end") {
       const result = event.result as { content?: Array<{ type?: string; text?: string }>; details?: unknown } | undefined;
       const resultText = result?.content?.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n").trim();
@@ -1802,7 +1887,9 @@ function createSession(input: {
       if (event.toolName === "search_web" && !needsLiveWebResearch(runtime.currentMessage ?? "")) return;
       runtime.emit({
         type: "tool_end",
+        toolCallId: event.toolCallId,
         name: event.toolName,
+        ...describeToolActivity(event.toolName),
         isError: event.isError,
         details: result?.details,
         resultText,
@@ -1898,6 +1985,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
   session.runtime.webSearchCompleted = false;
   session.runtime.turnTrace = { startedAt: Date.now(), toolCalls: [] };
   session.runtime.producedMedia = [];
+  if (!input.hidden && settings.persistentTasks && shouldPersistTask(input.message)) session.runtime.emit({ type: "task_start", goal: input.message });
   // Supervisor-safe resume: on every real turn, re-drive any media jobs for this
   // conversation that were left queued/running (detached after a crash or a turn
   // that ended early), so a queued job can never orphan from runtime state.
@@ -1923,6 +2011,8 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
     agentId: session.runtime.agentId,
     perOperationCapUsd: settings.maxMediaUsd,
     chatModel: settings.chatModel,
+    approvalPolicy: settings.approvalPolicy,
+    persistentTasks: settings.persistentTasks,
     tools: session.runtime.toolNames ?? [],
     memoryAgentId: memoryScope.agentId,
     includeModels: false,
@@ -2064,7 +2154,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
           ?? unansweredUserMessage;
         const usedTools = addedMessages.some((message) => message.role === "assistant"
           && message.content.some((part) => part.type === "toolCall"));
-        session.agent.state.messages = priorMessages;
+        if (!usedTools) session.agent.state.messages = priorMessages;
         // A user cancellation stops the turn. If a tool already ran, another model
         // must not replay it. Anything else (timeout, transient model or network
         // error) falls through to the next candidate instead of failing the turn.
@@ -2146,7 +2236,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
       const usedTools = addedMessages.flatMap((message) => message.role === "assistant"
         ? message.content.flatMap((part) => (part.type === "toolCall" ? [part.name] : []))
         : []);
-      session.agent.state.messages = priorMessages;
+      if (!usedTools.length) session.agent.state.messages = priorMessages;
       // Once any tool has run, another model must not replay the turn (tool calls
       // can spend money or mutate local and external state). Every other failure,
       // including a timeout, falls through to the next candidate; a genuine user
@@ -2246,7 +2336,7 @@ export async function runAgentTurn(input: AgentTurnInput): Promise<void> {
     // Async Lab review after recovery: if a failure pattern is emerging, let the
     // outer loop draft a bounded proposal in the background. Best-effort; it never
     // blocks the turn and never promotes — proposals still require human approval.
-    void generateProposal(`Automatic review after a ${recovery.category} failure the supervisor handled.`, { modelReview: false }).catch(() => undefined);
+    void generateProposal(`Automatic review after a ${recovery.category} failure the supervisor handled.`, { modelReview: true }).catch(() => undefined);
     if (recovery.text) {
       await appendSessionRecord({
         sessionId: input.sessionId,

@@ -57,10 +57,16 @@ export interface AgentSettings {
   webSearch: boolean;
   fileAccess: boolean;
   shellAccess: boolean;
+  /** How local mutations and commands are approved by the owner. */
+  approvalPolicy: ApprovalPolicy;
+  /** Keep actionable tasks moving through verification and bounded recovery. */
+  persistentTasks: boolean;
   reasoningEffort: ReasoningEffort;
   chatModelSupportsReasoning: boolean;
   chatModelSupportsReasoningEffort: boolean;
 }
+
+export type ApprovalPolicy = "always_ask" | "risk_based" | "always_allow" | "never_allow";
 
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -89,6 +95,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   webSearch: true,
   fileAccess: true,
   shellAccess: true,
+  approvalPolicy: "risk_based",
+  persistentTasks: true,
   reasoningEffort: "medium",
   chatModelSupportsReasoning: false,
   chatModelSupportsReasoningEffort: false,

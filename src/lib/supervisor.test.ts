@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chooseRecoveryStrategy, diagnoseFailure, explanationFor } from "./supervisor";
+import { chooseRecoveryStrategy, diagnoseFailure, explanationFor, runSupervisorRecovery } from "./supervisor";
 
 test("diagnoseFailure classifies each common failure signature", () => {
   assert.equal(diagnoseFailure("Request timed out after 120000ms").category, "timeout");
@@ -52,4 +52,20 @@ test("chooseRecoveryStrategy waits on rate limits and does not retry auth or bad
   assert.equal(chooseRecoveryStrategy(diagnoseFailure("429 rate limit"), { canRetry: true }), "wait_retry");
   assert.equal(chooseRecoveryStrategy(diagnoseFailure("401 invalid api key"), { canRetry: true }), "explain");
   assert.equal(chooseRecoveryStrategy(diagnoseFailure("400 bad request"), { canRetry: true, pendingMedia: 3 }), "explain");
+});
+
+test("checkpoint recovery tells the client to resume automatically instead of asking the user to continue", async () => {
+  const events: Record<string, unknown>[] = [];
+  const result = await runSupervisorRecovery({
+    message: "finish the task",
+    lastError: "401 invalid api key",
+    canRetry: false,
+    lastCheckpoint: { label: "tests passed", createdAt: "2026-07-16T00:00:00.000Z" },
+    emit: (event) => events.push(event),
+  });
+  assert.equal(result.strategy, "resume_point");
+  assert.equal(result.autoResume, true);
+  assert.match(result.text, /resume.*automatically/i);
+  assert.doesNotMatch(result.text, /say continue/i);
+  assert.equal(events.some((event) => event.type === "recovery" && event.autoResume === true), true);
 });

@@ -65,6 +65,8 @@ function sampleSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapsh
       canChangePermissions: false,
       canModifyRuntime: false,
       cameraConditional: true,
+      approvalPolicy: "risk_based",
+      persistentTasks: true,
     },
     budget: {
       currency: "USD",

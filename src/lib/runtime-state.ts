@@ -98,6 +98,8 @@ export interface RuntimePermissions {
   canChangePermissions: boolean;
   canModifyRuntime: boolean;
   cameraConditional: boolean;
+  approvalPolicy: "always_ask" | "risk_based" | "always_allow" | "never_allow";
+  persistentTasks: boolean;
 }
 
 export interface RuntimeBudget {
@@ -283,6 +285,7 @@ export function renderRuntimeHeader(snapshot: RuntimeSnapshot): string {
   const cannot = snapshot.capabilities.filter((cap) => !cap.available).map((cap) => cap.name);
   if (have.length) lines.push(`Capabilities you HAVE right now: ${have.join(", ")}.`);
   if (cannot.length) lines.push(`You CANNOT (needs Lab/owner): ${cannot.join(", ")}.`);
+  lines.push(`Owner action policy: ${snapshot.permissions.approvalPolicy}; persistent task completion: ${snapshot.permissions.persistentTasks ? "on" : "off"}.`);
 
   const running = activeJobs(snapshot.jobs);
   if (running.length) {

@@ -235,13 +235,29 @@ export function SettingsDrawer({
                   <i />
                 </label>
                 <label className={`toggle-field ${!settings.fileAccess ? "is-disabled" : ""}`}>
-                  <span><strong>Run terminal commands</strong><small>Let the agent run shell commands (npm, git, builds). It always asks before running.</small></span>
+                  <span><strong>Run terminal commands</strong><small>Let the agent run shell commands (npm, git, builds) under the approval policy below.</small></span>
                   <input
                     type="checkbox"
                     checked={settings.shellAccess}
                     disabled={!settings.fileAccess}
                     onChange={(event) => update("shellAccess", event.target.checked)}
                   />
+                  <i />
+                </label>
+                <label className="settings-field">
+                  <span className="field-heading"><span>Action approvals</span><small>How local changes and commands are authorized</small></span>
+                  <span className="select-wrap">
+                    <select value={settings.approvalPolicy} onChange={(event) => update("approvalPolicy", event.target.value as AgentSettings["approvalPolicy"])}>
+                      <option value="risk_based">Ask only for risky actions</option>
+                      <option value="always_ask">Always ask</option>
+                      <option value="always_allow">Always allow</option>
+                      <option value="never_allow">Never allow changes</option>
+                    </select>
+                  </span>
+                </label>
+                <label className="toggle-field">
+                  <span><strong>Finish tasks autonomously</strong><small>Verify results and continue through bounded recovery instead of stopping at the first issue</small></span>
+                  <input type="checkbox" checked={settings.persistentTasks} onChange={(event) => update("persistentTasks", event.target.checked)} />
                   <i />
                 </label>
               </section>

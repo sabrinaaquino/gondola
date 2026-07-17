@@ -92,9 +92,9 @@ function sameConfigPatch(a: ImprovementProposal["configPatch"], b: ImprovementPr
  * optional agent-stated reason (from propose_harness_change) onto the proposal.
  */
 export interface GenerateProposalOptions {
-  /** Run the model-based reviewer for an explicit agent flag. Defaults to true
-   * when a hint is present; the automatic post-recovery path passes false so it
-   * relies on the deterministic reviewers (and spends no inference). */
+  /** Run the model-based reviewer for an explicit agent or supervisor flag.
+   * Defaults to true when a hint is present so the Lab can interpret the live
+   * runtime's diagnosis instead of discarding it. */
   modelReview?: boolean;
   /** Injectable reviewer completion for tests. */
   reviewerComplete?: ReviewerCompletion;
@@ -181,7 +181,7 @@ export async function recentFailureSummary(limit = 12): Promise<string> {
   const parts = [...counts.entries()]
     .sort((left, right) => right[1] - left[1])
     .map(([category, n]) => `${n} ${category.replace(/_/g, " ")}`);
-  return `Reliability note: ${failures.length} of your recent turns hit errors (${parts.join(", ")}). If a pattern like this keeps recurring, you may call propose_harness_change to flag it to Gondola Lab for a reviewed, bounded fix.`;
+  return `Reliability note: ${failures.length} of your recent turns hit errors (${parts.join(", ")}). When the same pattern recurs, call propose_harness_change to flag it to Gondola Lab for a reviewed, bounded fix, then continue the current task.`;
 }
 
 /** Whether the Lab autopilot may promote low-risk, passed proposals without a human. */

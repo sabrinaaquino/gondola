@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { guardedToolList, hasSessionGrant, toolRisk, type SessionGrant } from "./approval-store";
+import { approvalPolicyDecision, guardedToolList, hasSessionGrant, toolRisk, type SessionGrant } from "./approval-store";
 
 const grants: SessionGrant[] = [
   { conversationId: "c1", tool: "run_command", grantedAt: "2026-07-16T00:00:00.000Z", grantedBy: "owner" },
@@ -25,8 +25,19 @@ test("guarded tools declare a risk level and non-guarded tools have none", () =>
   assert.equal(toolRisk("delete_path"), "high");
   assert.equal(toolRisk("run_command"), "high");
   assert.equal(toolRisk("write_file"), "medium");
+  assert.equal(toolRisk("edit_file"), "medium");
+  assert.equal(toolRisk("create_directory"), "low");
   assert.equal(toolRisk("read_file"), undefined);
   const list = guardedToolList();
   assert.ok(list.some((entry) => entry.tool === "delete_path" && entry.risk === "high"));
   assert.ok(list.length >= 4);
+});
+
+test("approval policies consistently auto-allow, ask, or deny by risk", () => {
+  assert.equal(approvalPolicyDecision("always_allow", "high"), "auto");
+  assert.equal(approvalPolicyDecision("never_allow", "low"), "deny");
+  assert.equal(approvalPolicyDecision("always_ask", "low"), "ask");
+  assert.equal(approvalPolicyDecision("risk_based", "low"), "auto");
+  assert.equal(approvalPolicyDecision("risk_based", "medium"), "ask");
+  assert.equal(approvalPolicyDecision("risk_based", "high"), "ask");
 });

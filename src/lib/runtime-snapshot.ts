@@ -64,6 +64,8 @@ export interface RuntimeSnapshotInput {
   agentId: string;
   perOperationCapUsd: number;
   chatModel: string;
+  approvalPolicy?: "always_ask" | "risk_based" | "always_allow" | "never_allow";
+  persistentTasks?: boolean;
   /** The live toolset for this session (name + optional label). */
   tools: { name: string; label?: string }[];
   /** This turn's tool outcomes, from the turn trace, to mark ✓/✗ per capability. */
@@ -227,6 +229,8 @@ export async function buildRuntimeSnapshot(input: RuntimeSnapshotInput): Promise
       canChangePermissions: false,
       canModifyRuntime: false,
       cameraConditional: true,
+      approvalPolicy: input.approvalPolicy ?? "risk_based",
+      persistentTasks: input.persistentTasks !== false,
     },
     budget: {
       currency: "USD",

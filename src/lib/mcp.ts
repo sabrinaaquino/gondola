@@ -7,6 +7,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { McpToolSummary } from "./app-types";
 import type { McpServerConfig } from "./workspace";
 import { FileOAuthProvider } from "./mcp-oauth";
+import { redactToolArgs } from "./tool-activity";
 
 const HTTP_RECONNECT = {
   initialReconnectionDelay: 500,
@@ -45,6 +46,7 @@ interface PendingMcpApproval {
 export interface McpExecutionContext {
   sessionId: string;
   currentUserMessage(): string;
+  requestApproval?: (input: { tool: string; summary: string }) => Promise<{ approved: boolean; denied?: boolean; approvalId?: string; risk?: string }>;
 }
 
 const globalCache = globalThis as typeof globalThis & {
@@ -266,21 +268,45 @@ export function createMcpAgentTools(
       executionMode: needsApproval ? "sequential" : "parallel",
       async execute(_toolCallId, params, signal) {
         if (needsApproval) {
-          const approval = requireMcpApproval(context, server, tool.name, params);
-          if (!approval.approved) {
-            return {
-              content: [{
-                type: "text",
-                text: `No external action was taken. Ask the user to reply with \"Confirm MCP action ${approval.token}\" to approve this exact ${server.name}: ${tool.name} request. The confirmation expires in five minutes.`,
-              }],
-              details: {
-                kind: "mcp_confirmation",
-                serverId: server.id,
-                serverName: server.name,
-                toolName: tool.name,
-                token: approval.token,
-              },
-            };
+          if (context.requestApproval) {
+            const safeArgs = JSON.stringify(redactToolArgs(params));
+            const summary = `call ${server.name}: ${tool.name}${safeArgs && safeArgs !== "{}" ? ` with ${safeArgs.slice(0, 180)}` : ""}`;
+            const approval = await context.requestApproval({ tool: name, summary });
+            if (!approval.approved) {
+              const denied = approval.denied === true;
+              return {
+                content: [{ type: "text", text: denied ? `This external action is blocked by your Never allow policy: ${summary}.` : `${summary} needs your approval in the action card.` }],
+                details: {
+                  kind: "mcp_confirmation",
+                  serverId: server.id,
+                  serverName: server.name,
+                  toolName: tool.name,
+                  blocked: denied ? "approval_policy" : "approval_required",
+                  needsConfirmation: !denied,
+                  approvalId: approval.approvalId,
+                  approvalTool: name,
+                  approvalSummary: summary,
+                  approvalRisk: approval.risk ?? "medium",
+                },
+              };
+            }
+          } else {
+            const approval = requireMcpApproval(context, server, tool.name, params);
+            if (!approval.approved) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `No external action was taken. Ask the user to reply with \"Confirm MCP action ${approval.token}\" to approve this exact ${server.name}: ${tool.name} request. The confirmation expires in five minutes.`,
+                }],
+                details: {
+                  kind: "mcp_confirmation",
+                  serverId: server.id,
+                  serverName: server.name,
+                  toolName: tool.name,
+                  token: approval.token,
+                },
+              };
+            }
           }
         }
         const client = await connect(server);

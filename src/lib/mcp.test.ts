@@ -40,3 +40,36 @@ test("blocks an MCP mutation until a later user confirmation", async () => {
   const second = await execute("call-2", { id: "123" }, new AbortController().signal);
   assert.equal(second.details?.token, first.details?.token);
 });
+
+test("routes MCP mutations through the shared approval card when the runtime provides it", async () => {
+  const server: McpServerConfig = {
+    id: "test-server-card",
+    name: "Issue tracker",
+    transport: "http",
+    url: "http://127.0.0.1:9/mcp",
+    headers: {}, env: {}, status: "connected",
+    tools: [{
+      name: "create_issue", description: "Create an issue",
+      inputSchema: { type: "object", properties: { title: { type: "string" }, apiKey: { type: "string" } } },
+      readOnly: false, destructive: false,
+    }],
+    createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+  };
+  let requested: { tool: string; summary: string } | undefined;
+  const [tool] = createMcpAgentTools([server], {
+    sessionId: "card-session",
+    currentUserMessage: () => "create it",
+    requestApproval: async (input) => {
+      requested = input;
+      return { approved: false, approvalId: "approval-1", risk: "medium" };
+    },
+  });
+  const result = await tool.execute("call-card", { title: "Fix bug", apiKey: "do-not-show" }, new AbortController().signal) as {
+    details?: Record<string, unknown>;
+  };
+  assert.equal(result.details?.needsConfirmation, true);
+  assert.equal(result.details?.approvalId, "approval-1");
+  assert.equal(requested?.tool, "mcp_issue_tracker_create_issue");
+  assert.match(requested?.summary ?? "", /Fix bug/);
+  assert.doesNotMatch(requested?.summary ?? "", /do-not-show/);
+});
