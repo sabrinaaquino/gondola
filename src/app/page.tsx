@@ -404,6 +404,16 @@ function toolStatus(name: string | undefined, agentName: string): string {
     case "generate_image": return "Painting with Venice";
     case "generate_video": return "Starting a Venice video";
     case "generate_music": return "Composing with Venice";
+    case "generate_narration": return "Recording the narration";
+    case "compose_media": return "Composing the final video";
+    case "verify_media": return "Verifying the video";
+    case "media_task_await": return "Waiting for media to finish rendering";
+    case "media_task_list": return "Checking on media jobs";
+    case "delegate_task": return "Delegating to a sub-agent";
+    case "orchestrate": return "Coordinating sub-agents";
+    case "run_command": return "Running a command";
+    case "write_file": return "Writing a file";
+    case "edit_file": return "Editing a file";
     default: return name?.startsWith("mcp_") ? "Using an assigned MCP tool" : "Using a Venice capability";
   }
 }
@@ -2406,7 +2416,8 @@ function Workspace() {
                 queueSpeech(narration, "warm", true);
               }
             }
-            ui(() => setMessages((current) => current.map((item) => item.id === assistantId && !item.text
+            liveStatusText = event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…`;
+            ui(() => setMessages((current) => current.map((item) => item.id === assistantId
               ? { ...item, statusText: event.name === "search_web" ? "I’m checking the live web for that now." : `${label}…` }
               : item)));
             syncLive();
@@ -3738,6 +3749,12 @@ function Workspace() {
                     if (!displayText && !(message.role === "assistant" && !message.thinkingStreaming)) return null;
                     return <MessageText text={displayText || message.statusText || `${agentName} is thinking…`} />;
                   })()}
+                  {message.role === "assistant" && message.streaming && stripInlinedAttachments(message.text) ? (
+                    <div className="message-working" aria-live="polite">
+                      <span className="tool-spinner" />
+                      <span>{message.statusText ?? `${agentName} is working…`}</span>
+                    </div>
+                  ) : null}
                   {message.role === "assistant" && message.recovered ? (
                     <div style={{ fontSize: "0.72rem", opacity: 0.6, marginTop: "0.25rem" }}>Recovered after an error</div>
                   ) : null}
